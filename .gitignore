@@ -1,0 +1,6 @@
+# Git repository data must not be retained in this repo
+.cache/
+dist/
+
+# Temporary analysis artifacts (local only)
+.tmp/

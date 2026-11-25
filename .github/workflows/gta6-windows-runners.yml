@@ -1,0 +1,50 @@
+name: GTA6 Windows Runners
+
+# Manual workflow: run on demand via GitHub Actions → "Run workflow" → "Run workflow".
+#
+# Every run:
+#   1. Re-downloads https://portwatch-vi.xyz/data/tracker.json and parses it.
+#   2. Downloads/updates each GTA6 Windows-runner repository into .cache/repos/<owner>__<name>
+#      (per-repo cache; repos only grow). Inaccessible repos or repos whose effective
+#      code count shrank keep the cached copy and get an error flag + anomaly.
+#   3. Packs the repository copies into dist/archives/*.zip.
+#   4. Generates the static page dist/index.html (status, info, download-only archive links).
+#   5. Publishes the artifacts with actions/upload-artifact.
+#   6. Deletes the artifacts again with geekyeggo/delete-artifact.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Cache repositories and state (per-repo, grow-only)
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: gta6-runners-cache-v1
+          restore-keys: |
+            gta6-runners-cache-
+
+      - name: Sync GTA6 Windows runners (download, update, generate page)
+        run: node scripts/gta6-windows-runner-sync.mjs
+
+      - name: Upload artifacts (pack & publish)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gta6-windows-runners
+          path: dist/
+
+      - name: Delete artifacts (final cleanup)
+        uses: geekyeggo/delete-artifact@v6
+        with:
+          name: gta6-windows-runners
