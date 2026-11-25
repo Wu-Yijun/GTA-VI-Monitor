@@ -195,21 +195,96 @@ function descriptionFor(entry, tracker, pageInfo) {
 }
 
 function completionScore(entry, tracker) {
+  // Site definition (4lwayz/portwatch-vi, assets/js/scoring.js: scoreEffort):
+  // efforts are scored 0-100 from ground work + ladder milestones + playing-well tracks.
   const byRepo = trackerObjectsByRepo(tracker);
   const obj = byRepo.get(entry.repo);
-  if (!obj) return null;
-  if (obj.gta) {
-    const g = obj.gta;
-    const world = Number(g.world || 0);
-    const playable = Number(g.playable || 0);
-    const story = Number(g.story || 0);
-    const render = Number(g.render || 0);
-    return Math.min(100, Math.max(0, Math.round(world * 25 + playable * 50 + story * 20 + render * 5)));
+  if (!obj || !obj.gta) return null; // site scores efforts; candidates have no completion here
+  return scoreEffort(obj).score;
+}
+
+// ---------------- site scoring (port of 4lwayz/portwatch-vi, assets/js/scoring.js) ----------------
+
+const GROUNDWORK = [
+  { key: 'loader', weight: 0.2 },
+  { key: 'shaders', weight: 0.28 },
+  { key: 'graphics', weight: 0.32 },
+  { key: 'proven', weight: 0.2 },
+];
+const SITE_TRACKS = [
+  { key: 'story', weight: 0.35 },
+  { key: 'render', weight: 0.25 },
+  { key: 'perf', weight: 0.2 },
+  { key: 'stability', weight: 0.2 },
+];
+const SITE_STABILITY = { unknown: 0, constant: 0, often: 0.25, sometimes: 0.55, rarely: 0.8, stable: 1 };
+const MILESTONES = [
+  { key: 'groundwork', at: 0 },
+  { key: 'loads', at: 10 },
+  { key: 'boots', at: 20 },
+  { key: 'menu', at: 30 },
+  { key: 'world', at: 40 },
+  { key: 'playable', at: 50 },
+  { key: 'complete', at: 100 },
+];
+const SITE_TICK = Object.fromEntries(MILESTONES.map((m) => [m.key, m.at]));
+const SITE_LADDER = ['loads', 'boots', 'menu', 'world', 'playable'];
+
+const clamp01 = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
+};
+
+// GTA ladder values are 0 (no), 0.5 (partially) or 1 (yes).
+function ladderValue(v) {
+  if (v === true) return 1;
+  if (v === false || v == null) return 0;
+  return clamp01(v);
+}
+
+function groundworkFraction(gw) {
+  return GROUNDWORK.reduce((sum, g) => sum + g.weight * clamp01(gw && gw[g.key]), 0);
+}
+
+function trackValues(gta = {}) {
+  return {
+    story: clamp01(gta.story),
+    render: clamp01(gta.render),
+    perf: clamp01((Number(gta.fps) || 0) / 30),
+    stability:
+      typeof gta.stability === 'number' ? clamp01(gta.stability) : (SITE_STABILITY[gta.stability] ?? SITE_STABILITY.unknown),
+  };
+}
+
+function scoreEffort(effort) {
+  if (!effort) return null;
+  const gw = groundworkFraction(effort.groundwork);
+  const gta = effort.gta || {};
+  let score = SITE_TICK.loads * gw;
+  let reached = 'groundwork';
+  let prevTick = score;
+
+  for (const key of SITE_LADDER) {
+    const v = ladderValue(gta[key]);
+    if (v >= 1) {
+      score = SITE_TICK[key];
+      prevTick = score;
+      reached = key;
+      continue;
+    }
+    if (v > 0) score = Math.max(score, prevTick + v * (SITE_TICK[key] - prevTick));
+    break;
   }
-  if (typeof obj.substance === 'number') {
-    return Math.min(100, Math.max(0, Math.round(obj.substance)));
+
+  const tracks = trackValues(gta);
+  const quality = SITE_TRACKS.reduce((sum, tr) => sum + tr.weight * tracks[tr.key], 0);
+  if (reached === 'playable') {
+    score = SITE_TICK.playable + quality * (SITE_TICK.complete - SITE_TICK.playable);
+    if (quality >= 1) reached = 'complete';
   }
-  return null;
+
+  if (Number.isFinite(effort.manualScore)) score = Math.min(100, Math.max(0, effort.manualScore));
+  return { score: Math.round(score * 10) / 10, reached };
 }
 
 function trackerArchived(tracker, repoPath) {

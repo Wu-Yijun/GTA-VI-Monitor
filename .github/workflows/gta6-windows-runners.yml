@@ -8,9 +8,8 @@ name: GTA6 Windows Runners
 #      (per-repo cache; repos only grow). Inaccessible repos or repos whose effective
 #      code count shrank keep the cached copy and get an error flag + anomaly.
 #   3. Packs the repository copies into dist/archives/*.zip.
-#   4. Generates the static page dist/index.html (status, info, download-only archive links).
-#   5. Publishes the artifacts with actions/upload-artifact.
-#   6. Deletes the artifacts again with geekyeggo/delete-artifact.
+#   4. Generates the static page dist/index.html (status + info + download-only archive links).
+#   5. Publishes the page to GitHub Pages: actions/upload-pages-artifact + actions/deploy-pages.
 
 on:
   workflow_dispatch:
@@ -18,6 +17,10 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,13 +41,13 @@ jobs:
       - name: Sync GTA6 Windows runners (download, update, generate page)
         run: node scripts/gta6-windows-runner-sync.mjs
 
-      - name: Upload artifacts (pack & publish)
-        uses: actions/upload-artifact@v4
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload static page as Pages artifact (publish)
+        uses: actions/upload-pages-artifact@v4
         with:
-          name: gta6-windows-runners
           path: dist/
 
-      - name: Delete artifacts (final cleanup)
-        uses: geekyeggo/delete-artifact@v6
-        with:
-          name: gta6-windows-runners
+      - name: Deploy page to GitHub Pages
+        uses: actions/deploy-pages@v4
