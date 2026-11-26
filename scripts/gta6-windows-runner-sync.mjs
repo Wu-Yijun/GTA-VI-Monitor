@@ -58,9 +58,9 @@
  *
  * Page
  * ----
- * dist/index.html + dist/runners.json, three added columns:
- * current effective lines, archived (good copy) effective lines, observation
- * progress n/3 (or 不可恢复).
+ * dist/index.html + dist/runners.json. The page has summary cards, search,
+ * status / source / anomaly filters, sorting (also mirrored in the URL), a
+ * responsive card layout, zip sizes and private / delisted / mirrored badges.
  */
 
 import fs from 'node:fs';
@@ -474,7 +474,11 @@ function extractRepos(tracker) {
 function trackerObjectsByRepo(tracker) {
   const byRepo = new Map();
   for (const effort of tracker.efforts || []) if (effort && effort.repo) byRepo.set(effort.repo, effort);
-  for (const candidate of tracker.candidates || []) if (candidate && candidate.repo) byRepo.set(candidate.repo, candidate);
+  // A rejected candidate must not shadow the effort object for the same repo
+  // (that would drop gta/groundwork and show a null completion, e.g. xcl-dev/xcl).
+  for (const candidate of tracker.candidates || []) {
+    if (candidate && candidate.repo && !byRepo.has(candidate.repo)) byRepo.set(candidate.repo, candidate);
+  }
   return byRepo;
 }
 
@@ -976,42 +980,135 @@ function sortedResults(results) {
   );
 }
 
+function attrEscape(value) {
+  return htmlEscape(value).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function fmtBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '';
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${bytes} B`;
+}
+
+function archiveSizeOf(archive) {
+  if (!archive) return null;
+  try {
+    return fs.statSync(path.join(ARCHIVES_DIR, archive)).size;
+  } catch {
+    return null;
+  }
+}
+
+function completionClass(value) {
+  if (value >= 80) return 'high';
+  if (value >= 50) return 'mid';
+  if (value >= 20) return 'low';
+  return 'min';
+}
+
+function formatLocal(iso) {
+  try {
+    return new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    })
+      .format(new Date(iso))
+      .replace(/\//g, '-');
+  } catch {
+    return iso;
+  }
+}
+
 function observationCell(rec) {
-  if (!rec.observation) return '-';
+  if (!rec.observation) return '<span class="muted">—</span>';
   if (rec.observation.dead) return '<span class="badge anom">不可恢复</span>';
-  return `${rec.observation.growth}/3`;
+  const growth = Math.max(0, Math.min(3, Number(rec.observation.growth) || 0));
+  return `<span class="obs-val">${growth}/3</span><span class="obs-bar"><i style="width:${(growth / 3) * 100}%"></i></span>`;
 }
 
 function generatePages(results) {
-  const rows = sortedResults(results)
-    .map((rec) => {
-      const desc = (rec.description || rec.repo || rec.name || rec.id || '').slice(0, 140);
-      const statusBadge =
-        rec.status === 'accessible'
+  const generatedIso = new Date().toISOString();
+  const generatedLocal = formatLocal(generatedIso);
+  const sorted = sortedResults(results);
+  const total = results.length;
+  const accessible = results.filter((rec) => rec.status === 'accessible').length;
+  const withArchive = results.filter((rec) => rec.archive).length;
+  const privateCount = results.filter((rec) => rec.status === 'private').length;
+  const anomalyCount = results.filter((rec) => (rec.anomalies || []).length).length;
+  const mirrored = results.filter((rec) => (rec.anomalies || []).includes('mirrored')).length;
+  const candidateCount = results.filter((rec) => rec.source === 'candidate').length;
+
+  const rows = sorted
+    .map((rec, index) => {
+      const displayName = rec.repo || rec.name || rec.id || 'private build';
+      const fullDesc = String(rec.description || rec.repo || rec.name || '');
+      const desc = fullDesc.length > 140 ? `${fullDesc.slice(0, 139)}…` : fullDesc;
+      const completion = Number.isFinite(rec.completion) ? rec.completion : null;
+      const archiveSize = archiveSizeOf(rec.archive);
+      const hasArchive = Boolean(rec.archive);
+      const isPrivate = rec.status === 'private';
+      const isCandidate = rec.source === 'candidate';
+
+      const statusBadge = isPrivate
+        ? '<span class="badge priv">私有</span>'
+        : rec.status === 'accessible'
           ? '<span class="badge ok">可访问</span>'
-          : rec.status === 'private'
-            ? '<span class="badge priv">私有</span>'
-            : '<span class="badge bad">不可访问</span>';
-      const anomalyBadges = rec.anomalies
+          : '<span class="badge bad">不可访问</span>';
+      const anomalyBadges = (rec.anomalies || [])
         .map((anomaly) => `<span class="badge anom">${htmlEscape(ANOMALY_LABELS[anomaly] || anomaly)}</span>`)
-        .join(' ');
-      const archive = rec.archive ? `<a href="archives/${rec.archive}" download>下载副本</a>` : '-';
-      const completion = rec.completion === null || rec.completion === undefined ? '-' : `${rec.completion}%`;
+        .join('');
+
       const repoCell = rec.repo
         ? `<a href="https://github.com/${htmlEscape(rec.repo)}" target="_blank" rel="noopener">${htmlEscape(rec.repo)}</a>`
         : `<span class="private-name">${htmlEscape(rec.name || rec.id || 'private build')}</span>`;
-      const filesCell = rec.status === 'private' ? '-' : String(rec.files || 0);
-      return `  <tr>
-    <td>${repoCell}</td>
-    <td>${statusBadge}${anomalyBadges}</td>
-    <td class="desc">${htmlEscape(desc)}</td>
-    <td class="num">${completion}</td>
-    <td>${htmlEscape(rec.branch || '-')}</td>
-    <td class="num">${filesCell}</td>
-    <td class="num">${fmtNum(rec.codeLines)}</td>
-    <td class="num">${fmtNum(rec.archiveLines)}</td>
-    <td class="num">${observationCell(rec)}</td>
-    <td>${archive}</td>
+      const sourceTag = isCandidate ? '<span class="tag">候选</span>' : '';
+
+      const subParts = [];
+      if (isPrivate) subParts.push('私有 build · 无公开仓库');
+      else {
+        if (rec.branch) subParts.push(rec.branch);
+        if (rec.files) subParts.push(`${fmtNum(rec.files)} 文件`);
+      }
+      const sub = subParts.join(' · ');
+
+      const completionCell =
+        completion === null
+          ? '<span class="muted">—</span>'
+          : `<div class="bar ${completionClass(completion)}" role="img" aria-label="完成度 ${completion}%"><span style="width:${Math.max(0, Math.min(100, completion))}%"></span></div><span class="pct">${completion}%</span>`;
+
+      const linesCell =
+        isPrivate || !Number.isFinite(rec.codeLines)
+          ? '<span class="muted">—</span>'
+          : (() => {
+              const delta = Number.isFinite(rec.archiveLines) ? rec.codeLines - rec.archiveLines : 0;
+              const cls = delta === 0 ? 'zero' : delta > 0 ? 'pos' : 'neg';
+              const sign = delta === 0 ? '±0' : delta > 0 ? `+${fmtNum(delta)}` : `−${fmtNum(Math.abs(delta))}`;
+              return `<span class="cur">${fmtNum(rec.codeLines)}</span> <span class="sep">/</span> <span class="arch">${fmtNum(rec.archiveLines)}</span> <span class="delta ${cls}">${sign}</span>`;
+            })();
+
+      const archiveCell = rec.archive
+        ? `<a class="btn" href="archives/${encodeURIComponent(rec.archive)}" download>下载${archiveSize ? ` · ${fmtBytes(archiveSize)}` : ''}</a>`
+        : '<span class="muted">—</span>';
+
+      const search = `${displayName} ${rec.id || ''} ${fullDesc}`.toLowerCase();
+      const empty = isPrivate ? ' empty' : '';
+
+      return `  <tr class="${isCandidate ? 'candidate' : ''}" data-status="${attrEscape(rec.status)}" data-source="${attrEscape(rec.source || '')}" data-anomalies="${attrEscape((rec.anomalies || []).join(' '))}" data-completion="${completion === null ? -1 : completion}" data-lines="${rec.codeLines ?? 0}" data-archive-lines="${rec.archiveLines ?? 0}" data-has-archive="${hasArchive ? 1 : 0}" data-name="${attrEscape(displayName.toLowerCase())}" data-search="${attrEscape(search)}">
+    <td class="rank" data-label="#">${index + 1}</td>
+    <td class="repo" data-label="仓库">${repoCell}${sourceTag}${sub ? `<div class="sub">${htmlEscape(sub)}</div>` : ''}</td>
+    <td class="status" data-label="状态">${statusBadge}${anomalyBadges}</td>
+    <td class="desc" data-label="说明" title="${attrEscape(fullDesc)}">${htmlEscape(desc)}</td>
+    <td class="completion" data-label="完成度">${completionCell}</td>
+    <td class="lines${empty}" data-label="行数">${linesCell}</td>
+    <td class="obs${empty}" data-label="观察">${observationCell(rec)}</td>
+    <td class="archive${empty}" data-label="副本">${archiveCell}</td>
   </tr>`;
     })
     .join('\n');
@@ -1021,47 +1118,389 @@ function generatePages(results) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GTA6 Windows 运行器 - 状态与信息</title>
+<title>GTA VI PC 运行器监控</title>
 <style>
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 2rem auto; max-width: 82rem; padding: 0 1rem; }
-h1 { font-size: 1.5rem; }
-table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
-th, td { border: 1px solid #ddd; padding: 0.45rem 0.6rem; text-align: left; font-size: 0.9rem; vertical-align: top; }
-th { background: #f5f5f5; }
-th.num, td.num { text-align: right; min-width: 4.5rem; }
-td.desc { min-width: 16rem; }
-.meta { color: #444; font-size: 0.9rem; }
-.meta b { color: #111; }
-.badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 0.6rem; font-size: 0.75rem; margin: 0 0.2rem; white-space: nowrap; }
-.badge.ok { background: #dcfce7; color: #15803d; }
-.badge.bad { background: #fee2e2; color: #b91c1c; }
-.badge.anom { background: #fef3c7; color: #b45309; }
-.badge.priv { background: #e0e7ff; color: #4338ca; }
-.private-name { color: #4338ca; font-weight: 600; }
-.note, .legend { color: #555; font-size: 0.85rem; }
-code { background: #f5f5f5; padding: 0.1rem 0.2rem; border-radius: 0.2rem; }
+:root {
+  --bg: #ffffff;
+  --fg: #111827;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+  --head: #f9fafb;
+  --zebra: #fafafa;
+  --accent: #2563eb;
+  --ok: #15803d;
+  --okbg: #dcfce7;
+  --bad: #b91c1c;
+  --badbg: #fee2e2;
+  --warn: #b45309;
+  --warnbg: #fef3c7;
+  --priv: #4338ca;
+  --privbg: #e0e7ff;
+}
+* { box-sizing: border-box; }
+html { color-scheme: light; }
+body {
+  margin: 0 auto;
+  padding: 1.5rem 1rem 2.5rem;
+  max-width: 78rem;
+  color: var(--fg);
+  background: var(--bg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+}
+.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+h1 { margin: 0 0 .25rem; font-size: 1.45rem; letter-spacing: -.01em; }
+.sub { margin: 0; color: var(--muted); font-size: .875rem; }
+.json-link { font-size: .8rem; color: var(--accent); text-decoration: none; border: 1px solid var(--border); border-radius: 999px; padding: .25rem .6rem; }
+.json-link:hover { background: var(--head); }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr)); gap: .6rem; margin: 1.1rem 0; }
+.stat { border: 1px solid var(--border); border-radius: 10px; padding: .6rem .75rem; background: #fff; }
+.stat .num { display: block; font-size: 1.35rem; font-weight: 700; line-height: 1.15; }
+.stat .label { color: var(--muted); font-size: .78rem; }
+.stat.warn .num { color: var(--warn); }
+.toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .6rem .8rem; margin: 1rem 0 .75rem; }
+.field { display: flex; flex-direction: column; gap: .2rem; }
+.field label { font-size: .72rem; color: var(--muted); }
+input[type="search"], select {
+  font: inherit;
+  font-size: .85rem;
+  padding: .35rem .5rem;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--fg);
+}
+input[type="search"] { min-width: 14rem; }
+.check { display: flex; align-items: center; gap: .35rem; font-size: .85rem; color: var(--muted); padding-bottom: .35rem; white-space: nowrap; }
+.btn {
+  display: inline-block;
+  padding: .3rem .6rem;
+  border: 0;
+  border-radius: 7px;
+  background: var(--accent);
+  color: #fff;
+  text-decoration: none;
+  font: inherit;
+  font-size: .78rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.btn:hover { filter: brightness(.95); }
+.btn.ghost { background: #fff; color: var(--fg); border: 1px solid var(--border); }
+.count { margin-left: auto; padding-bottom: .4rem; color: var(--muted); font-size: .82rem; white-space: nowrap; }
+.table-wrap { border: 1px solid var(--border); border-radius: 12px; }
+table { width: 100%; border-collapse: collapse; font-size: .86rem; }
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--head);
+  padding: .55rem .6rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  font-size: .76rem;
+  font-weight: 600;
+  color: #374151;
+  white-space: nowrap;
+}
+tbody td { padding: .5rem .6rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:nth-child(even) { background: var(--zebra); }
+tbody tr:hover { background: #f3f4f6; }
+tbody tr.candidate { color: #4b5563; }
+tbody tr.candidate .repo a { color: #4b5563; }
+td.rank { width: 2.2rem; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+td.repo { min-width: 13rem; }
+td.repo a { color: var(--accent); text-decoration: none; font-weight: 600; }
+td.repo a:hover { text-decoration: underline; }
+.private-name { font-weight: 600; color: var(--priv); }
+.sub-line { margin-top: .15rem; color: var(--muted); font-size: .75rem; }
+td .sub { margin-top: .15rem; color: var(--muted); font-size: .75rem; }
+.tag { display: inline-block; margin-left: .35rem; padding: .05rem .35rem; border-radius: 999px; font-size: .68rem; font-weight: 600; color: var(--muted); background: #f3f4f6; border: 1px solid var(--border); }
+td.status { min-width: 7.5rem; }
+.badge { display: inline-block; padding: .08rem .4rem; margin: 0 .15rem .15rem 0; border-radius: 999px; font-size: .7rem; font-weight: 600; white-space: nowrap; }
+.badge.ok { background: var(--okbg); color: var(--ok); }
+.badge.bad { background: var(--badbg); color: var(--bad); }
+.badge.anom { background: var(--warnbg); color: var(--warn); }
+.badge.priv { background: var(--privbg); color: var(--priv); }
+td.desc { max-width: 22rem; }
+td.completion { min-width: 7rem; }
+.bar { height: 7px; margin-bottom: .2rem; border-radius: 999px; background: #e5e7eb; overflow: hidden; }
+.bar span { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
+.bar.high span { background: #16a34a; }
+.bar.mid span { background: #2563eb; }
+.bar.low span { background: #d97706; }
+.bar.min span { background: #9ca3af; }
+.pct { font-size: .8rem; font-variant-numeric: tabular-nums; }
+td.lines { min-width: 9rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cur { font-weight: 600; }
+.arch, .sep { color: var(--muted); }
+.delta { margin-left: .2rem; font-size: .72rem; }
+.delta.zero { color: var(--muted); }
+.delta.neg { color: var(--bad); }
+.delta.pos { color: var(--ok); }
+td.obs { min-width: 5rem; }
+.obs-val { font-size: .8rem; font-variant-numeric: tabular-nums; }
+.obs-bar { display: inline-block; width: 2.2rem; height: 5px; margin-left: .35rem; border-radius: 999px; background: #e5e7eb; overflow: hidden; vertical-align: middle; }
+.obs-bar i { display: block; height: 100%; background: var(--warn); }
+.muted { color: var(--muted); }
+details.legend { margin-top: 1.1rem; border: 1px solid var(--border); border-radius: 10px; padding: .6rem .8rem; background: #fff; }
+details.legend summary { cursor: pointer; font-size: .85rem; font-weight: 600; }
+details.legend p { margin: .5rem 0 0; color: var(--muted); font-size: .8rem; line-height: 1.6; }
+footer { display: flex; flex-wrap: wrap; gap: .4rem 1rem; margin-top: 1.2rem; color: var(--muted); font-size: .78rem; }
+footer a { color: var(--accent); }
+[hidden] { display: none !important; }
+@media (max-width: 900px) {
+  .table-wrap { border: 0; border-radius: 0; }
+  table, thead, tbody, tr, td { display: block; width: 100%; }
+  thead { display: none; }
+  tbody tr { margin: 0 0 .8rem; padding: .6rem .7rem; border: 1px solid var(--border); border-radius: 12px; background: #fff; }
+  tbody tr:nth-child(even) { background: #fff; }
+  tbody tr.candidate { background: #fcfcfd; }
+  tbody td { padding: .15rem 0; border: 0; }
+  tbody td::before { content: attr(data-label); display: inline-block; min-width: 3.6rem; color: var(--muted); font-size: .75rem; }
+  td.rank { display: none; }
+  td.repo { padding-bottom: .35rem; }
+  td.repo::before { display: none; }
+  td.desc { max-width: none; padding: .15rem 0 .35rem; }
+  td.desc::before { display: block; }
+  td.empty { display: none; }
+  td.completion .bar { max-width: 12rem; }
+  td.archive { padding-top: .35rem; }
+  .field.search { flex: 1 1 100%; }
+  .field.search input { width: 100%; min-width: 0; }
+  .count { margin-left: 0; }
+}
+@media print {
+  .toolbar, .json-link { display: none; }
+  body { max-width: none; }
+}
 </style>
 </head>
 <body>
-<h1>GTA6 Windows 运行器代码仓库</h1>
-<div class="meta">
-  <span>总仓库数：<b>${results.length}</b></span>
-  <span>可访问：<b>${results.filter((rec) => rec.status === 'accessible').length}</b></span>
-  <span>私有：<b>${results.filter((rec) => rec.status === 'private').length}</b></span>
-  <span>异常仓库：<b>${results.filter((rec) => rec.anomalies.length).length}</b></span>
-  <span>错误标记：<b>${results.filter((rec) => rec.error).length}</b></span>
-  <span>生成时间：<b>${htmlEscape(new Date().toISOString())}</b></span>
-</div>
-<p class="note">页面由 <code>scripts/gta6-windows-runner-sync.mjs</code> 生成（workflow_dispatch 触发）。仓库地址指向 GitHub；副本压缩包仅供下载（点击即下载，不会跳转）。<b>当前行数</b>为远端最新提交的有效代码行（不含空行和整行注释），<b>归档行数</b>为页面提供下载的副本的行数，<b>观察</b>为缩水后的恢复进度。</p>
-<table>
+<header class="page-head">
+  <div>
+    <h1>GTA VI PC 运行器监控</h1>
+    <p class="sub">portwatch 数据 + 本地副本 · 更新于 <time datetime="${generatedIso}">${generatedLocal} (UTC+8)</time></p>
+  </div>
+  <a class="json-link" href="runners.json">runners.json</a>
+</header>
+
+<section class="summary" aria-label="概览">
+  <div class="stat"><span class="num">${total}</span><span class="label">总条目</span></div>
+  <div class="stat"><span class="num">${accessible}</span><span class="label">可访问</span></div>
+  <div class="stat"><span class="num">${withArchive}</span><span class="label">可下载副本</span></div>
+  <div class="stat"><span class="num">${privateCount}</span><span class="label">私有</span></div>
+  <div class="stat warn"><span class="num">${anomalyCount}</span><span class="label">异常</span></div>
+  <div class="stat"><span class="num">${mirrored}</span><span class="label">镜像</span></div>
+  <div class="stat"><span class="num">${candidateCount}</span><span class="label">候选</span></div>
+</section>
+
+<section class="toolbar" id="toolbar" hidden>
+  <div class="field search">
+    <label for="q">搜索</label>
+    <input id="q" type="search" placeholder="仓库 / 名称 / 说明" autocomplete="off">
+  </div>
+  <div class="field">
+    <label for="status">状态</label>
+    <select id="status">
+      <option value="all">全部</option>
+      <option value="accessible">可访问</option>
+      <option value="private">私有</option>
+      <option value="inaccessible">不可访问</option>
+    </select>
+  </div>
+  <div class="field">
+    <label for="source">来源</label>
+    <select id="source">
+      <option value="all">全部</option>
+      <option value="effort">portwatch 收录</option>
+      <option value="candidate">候选 / 副本</option>
+    </select>
+  </div>
+  <div class="field">
+    <label for="anomaly">异常</label>
+    <select id="anomaly">
+      <option value="all">全部</option>
+      <option value="mirrored">镜像</option>
+      <option value="delisted">已移出</option>
+      <option value="disappeared">消失</option>
+      <option value="code_deleted">观察</option>
+      <option value="unrecoverable">不可恢复</option>
+      <option value="frozen">冻结</option>
+    </select>
+  </div>
+  <label class="check"><input id="archive" type="checkbox"> 只看有副本</label>
+  <div class="field">
+    <label for="sort">排序</label>
+    <select id="sort">
+      <option value="completion">完成度</option>
+      <option value="name">名称</option>
+      <option value="lines">当前行数</option>
+      <option value="archive">归档行数</option>
+    </select>
+  </div>
+  <button type="button" id="reset" class="btn ghost">重置</button>
+  <span class="count" id="count" aria-live="polite">显示 ${total} / ${total}</span>
+</section>
+
+<div class="table-wrap">
+<table id="repos">
   <thead>
-    <tr><th>仓库地址</th><th>状态与异常</th><th>项目说明</th><th>完成度</th><th>分支</th><th>文件数</th><th>当前行数</th><th>归档行数</th><th>观察</th><th>副本下载</th></tr>
+    <tr>
+      <th class="rank" scope="col">#</th>
+      <th scope="col">仓库 / 名称</th>
+      <th scope="col">状态</th>
+      <th scope="col">说明</th>
+      <th scope="col">完成度</th>
+      <th scope="col">行数（当前 / 归档）</th>
+      <th scope="col">观察</th>
+      <th scope="col">副本</th>
+    </tr>
   </thead>
   <tbody>
 ${rows}
   </tbody>
 </table>
-<p class="legend">图例：<b class="badge ok">可访问</b> 可正常获取；<b class="badge bad">不可访问</b> 当前无法获取（消失）；<b class="badge priv">私有</b> portwatch 收录但没有公开仓库/代码；<b class="badge anom">镜像</b> 原仓库不可访问，副本来自镜像源；<b class="badge anom">已移出 portwatch 列表</b> 该项目不再出现在 tracker 中，我们保留并继续标记；<b class="badge anom">代码大量删除</b> 有效行数跌破基线的 40%，已冻结为旧副本；<b class="badge anom">消失</b> 仓库已消失；<b class="badge anom">冻结</b> 已归档或其他异常状态；<b class="badge anom">不可恢复</b> 有效行数跌破基线的 5%。</p>
+</div>
+
+<details class="legend">
+  <summary>说明与图例</summary>
+  <p><b>当前行数</b>为远端最新提交的有效代码行（不含空行和整行注释）；<b>归档行数</b>为页面提供下载的副本的行数；<b>±</b> 为当前相对归档的差值，红色表示归档副本比当前多（冻结的旧副本）。</p>
+  <p><b>可访问</b> 正常获取；<b>不可访问</b> 当前无法获取；<b>私有</b> portwatch 收录但没有公开仓库/代码；<b>镜像</b> 原仓库不可访问，副本来自镜像源；<b>已移出 portwatch 列表</b> 不再出现在 tracker 中，但保留；<b>观察 n/3</b> 缩水后的恢复进度；<b>不可恢复</b> 有效行数跌破基线的 5%；<b>候选</b> 是 portwatch 未收录的候选/副本。</p>
+</details>
+
+<footer>
+  <span>数据源：<a href="https://portwatch-vi.xyz" target="_blank" rel="noopener">portwatch-vi.xyz</a></span>
+  <span><a href="runners.json">runners.json</a></span>
+  <span>由 <code>scripts/gta6-windows-runner-sync.mjs</code> 生成</span>
+</footer>
+
+<script>
+(() => {
+  const table = document.getElementById('repos');
+  if (!table) return;
+  const tbody = table.tBodies[0];
+  const rows = Array.from(tbody.rows);
+  const toolbar = document.getElementById('toolbar');
+  toolbar.hidden = false;
+  const q = document.getElementById('q');
+  const status = document.getElementById('status');
+  const source = document.getElementById('source');
+  const anomaly = document.getElementById('anomaly');
+  const archive = document.getElementById('archive');
+  const sort = document.getElementById('sort');
+  const reset = document.getElementById('reset');
+  const count = document.getElementById('count');
+  const state = { q: '', status: 'all', source: 'all', anomaly: 'all', archive: false, sort: 'completion' };
+  const params = new URLSearchParams(location.search);
+
+  const readUrl = () => {
+    state.q = (params.get('q') || '').trim();
+    state.status = params.get('status') || 'all';
+    state.source = params.get('source') || 'all';
+    state.anomaly = params.get('anomaly') || 'all';
+    state.archive = params.get('archive') === '1';
+    state.sort = params.get('sort') || 'completion';
+    q.value = state.q;
+    status.value = state.status;
+    source.value = state.source;
+    anomaly.value = state.anomaly;
+    archive.checked = state.archive;
+    sort.value = state.sort;
+  };
+
+  const writeUrl = () => {
+    const p = new URLSearchParams();
+    if (state.q) p.set('q', state.q);
+    if (state.status !== 'all') p.set('status', state.status);
+    if (state.source !== 'all') p.set('source', state.source);
+    if (state.anomaly !== 'all') p.set('anomaly', state.anomaly);
+    if (state.archive) p.set('archive', '1');
+    if (state.sort !== 'completion') p.set('sort', state.sort);
+    const qs = p.toString();
+    try {
+      history.replaceState(null, '', qs ? '?' + qs : location.pathname + location.hash);
+    } catch {
+      /* file:// previews and embedded browsers can reject this */
+    }
+  };
+
+  const matches = (row) => {
+    const d = row.dataset;
+    if (state.q && !(d.search || '').includes(state.q.toLowerCase())) return false;
+    if (state.status !== 'all' && d.status !== state.status) return false;
+    if (state.source !== 'all' && d.source !== state.source) return false;
+    if (state.anomaly !== 'all' && !(d.anomalies || '').split(' ').includes(state.anomaly)) return false;
+    if (state.archive && d.hasArchive !== '1') return false;
+    return true;
+  };
+
+  const updateRanks = () => {
+    let n = 0;
+    for (const row of rows) {
+      if (row.hidden) continue;
+      n += 1;
+      if (row.cells[0]) row.cells[0].textContent = String(n);
+    }
+  };
+
+  const compare = (a, b) => {
+    if (state.sort === 'name') return (a.dataset.name || '').localeCompare(b.dataset.name || '');
+    if (state.sort === 'lines') return Number(b.dataset.lines || 0) - Number(a.dataset.lines || 0);
+    if (state.sort === 'archive') return Number(b.dataset.archiveLines || 0) - Number(a.dataset.archiveLines || 0);
+    return Number(b.dataset.completion || -1) - Number(a.dataset.completion || -1);
+  };
+
+  const sortRows = () => {
+    rows.sort(compare);
+    for (const row of rows) tbody.appendChild(row);
+    updateRanks();
+  };
+
+  const apply = () => {
+    let visible = 0;
+    for (const row of rows) {
+      const show = matches(row);
+      row.hidden = !show;
+      if (show) visible += 1;
+    }
+    count.textContent = '显示 ' + visible + ' / ' + rows.length;
+    updateRanks();
+    writeUrl();
+  };
+
+  const resetAll = () => {
+    state.q = '';
+    state.status = 'all';
+    state.source = 'all';
+    state.anomaly = 'all';
+    state.archive = false;
+    state.sort = 'completion';
+    q.value = '';
+    status.value = 'all';
+    source.value = 'all';
+    anomaly.value = 'all';
+    archive.checked = false;
+    sort.value = 'completion';
+    sortRows();
+    apply();
+  };
+
+  readUrl();
+  q.addEventListener('input', () => { state.q = q.value.trim(); apply(); });
+  status.addEventListener('change', () => { state.status = status.value; apply(); });
+  source.addEventListener('change', () => { state.source = source.value; apply(); });
+  anomaly.addEventListener('change', () => { state.anomaly = anomaly.value; apply(); });
+  archive.addEventListener('change', () => { state.archive = archive.checked; apply(); });
+  sort.addEventListener('change', () => { state.sort = sort.value; sortRows(); apply(); });
+  reset.addEventListener('click', resetAll);
+  sortRows();
+  apply();
+})();
+</script>
 </body>
 </html>`;
 
@@ -1071,14 +1510,14 @@ ${rows}
   const runnersJson = {
     schema: 3,
     metricVersion: METRIC_VERSION,
-    generatedAt: new Date().toISOString(),
+    generatedAt: generatedIso,
     trackerUrl: TRACKER_URL,
-    total: results.length,
-    accessible: results.filter((rec) => rec.status === 'accessible').length,
-    private: results.filter((rec) => rec.status === 'private').length,
-    anomalies: results.filter((rec) => rec.anomalies.length).length,
+    total,
+    accessible,
+    private: privateCount,
+    anomalies: anomalyCount,
     errors: results.filter((rec) => rec.error).length,
-    repos: sortedResults(results).map((rec) => ({
+    repos: sorted.map((rec) => ({
       repo: rec.repo || null,
       name: rec.name || null,
       source: rec.source,
@@ -1096,6 +1535,7 @@ ${rows}
       anomalies: rec.anomalies,
       error: rec.error,
       archive: rec.archive || null,
+      archiveSize: archiveSizeOf(rec.archive),
       description: rec.description,
       completion: rec.completion,
       sourceOnly: rec.sourceOnly,
