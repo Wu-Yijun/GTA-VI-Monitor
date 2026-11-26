@@ -12,7 +12,7 @@ name: GTA6 Windows Runners
 #      taken from the deployed archives/ directory instead.
 #   3. Freezes a repository when its effective code lines fall below 40% of the
 #      baseline (old copy keeps being served) and recovers it on a strong
-#      rebound or after three growth rounds.
+#      rebound or after three rounds of >40-line growth.
 #   4. Packs the repository copies into dist/archives/*.zip.
 #   5. Generates the static page dist/index.html + dist/runners.json.
 #   6. Publishes the page to GitHub Pages.

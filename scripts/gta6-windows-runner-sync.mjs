@@ -52,8 +52,8 @@
  *             || cur >= 1.2 * prev && cur - prev >= 200
  *             || cur - prev >= 500
  *             || !dead && growth >= 3
- *   growth  : +1 when cur > prev; reset when cur < 0.8 * prev; unchanged when
- *             flat or within a -20% move.
+ *   growth  : +1 only when cur - prev > 40 lines; reset when cur < 0.8 * prev;
+ *             unchanged when flat, within a -20% move, or a smaller increase.
  * While frozen the old copy is served and nothing is overwritten.
  *
  * Page
@@ -95,6 +95,7 @@ const JUMP_RATIO = 1.2;
 const JUMP_MIN_LINES = 200;
 const JUMP_ABS_LINES = 500;
 const GROWTH_TARGET = 3;
+const GROWTH_MIN_LINES = 40;
 const GROWTH_RESET_RATIO = 0.8;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -703,7 +704,7 @@ function decide(baseline, cur, observation, nowIso) {
   const jumpAbs = cur - prev >= JUMP_ABS_LINES;
 
   let growth = Number.isFinite(observation.growth) ? observation.growth : 0;
-  if (cur > prev) growth += 1;
+  if (cur - prev > GROWTH_MIN_LINES) growth += 1;
   else if (cur < prev * GROWTH_RESET_RATIO) growth = 0;
 
   const next = {
@@ -1369,7 +1370,7 @@ ${rows}
 <details class="legend">
   <summary>说明与图例</summary>
   <p><b>当前行数</b>为远端最新提交的有效代码行（不含空行和整行注释）；<b>归档行数</b>为页面提供下载的副本的行数；<b>±</b> 为当前相对归档的差值，红色表示归档副本比当前多（冻结的旧副本）。</p>
-  <p><b>可访问</b> 正常获取；<b>不可访问</b> 当前无法获取；<b>私有</b> portwatch 收录但没有公开仓库/代码；<b>镜像</b> 原仓库不可访问，副本来自镜像源；<b>已移出 portwatch 列表</b> 不再出现在 tracker 中，但保留；<b>观察 n/3</b> 缩水后的恢复进度；<b>不可恢复</b> 有效行数跌破基线的 5%；<b>候选</b> 是 portwatch 未收录的候选/副本。</p>
+  <p><b>可访问</b> 正常获取；<b>不可访问</b> 当前无法获取；<b>私有</b> portwatch 收录但没有公开仓库/代码；<b>镜像</b> 原仓库不可访问，副本来自镜像源；<b>已移出 portwatch 列表</b> 不再出现在 tracker 中，但保留；<b>观察 n/3</b> 缩水后每轮增长 &gt;40 行才计入的恢复进度；<b>不可恢复</b> 有效行数跌破基线的 5%；<b>候选</b> 是 portwatch 未收录的候选/副本。</p>
 </details>
 
 <footer>
@@ -1724,6 +1725,7 @@ export {
   SITE_URL,
   assignNames,
   countCodeLinesInDir,
+  decide,
   extractRepos,
   generatePages,
   makeArchive,
