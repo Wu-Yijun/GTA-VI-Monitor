@@ -37,6 +37,13 @@
  *   - both missing         -> an accessible repository is re-cloned
  *                             (no shrink detection possible for that run).
  *
+ * Large copies
+ * ------------
+ * A copy whose zip exceeds 100 MB is still stored in the per-repository cache,
+ * but it is not published as a Pages asset: the row links to GitHub's own
+ * archive zip instead. This only applies while the repository is accessible
+ * and not frozen/delisted; otherwise the old copy keeps being served.
+ *
  * Effective code lines
  * --------------------
  * Only non-blank lines of whitelisted source extensions are counted; whole-line
@@ -98,6 +105,9 @@ const GROWTH_TARGET = 3;
 const GROWTH_MIN_LINES = 40;
 const GROWTH_RESET_RATIO = 0.8;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
+// A larger copy stays in the cache but is not uploaded to Pages (GitHub's zip
+// is linked instead).
+const ARCHIVE_SIZE_LIMIT = 100 * 1024 * 1024;
 
 const ANOMALY_LABELS = {
   code_deleted: '代码大量删除',
@@ -722,6 +732,12 @@ function decide(baseline, cur, observation, nowIso) {
 
 // ---------------- archive generation ----------------
 
+function githubZipUrl(repo, branch) {
+  if (!branch) return `https://github.com/${repo}/archive/HEAD.zip`;
+  const ref = branch.split('/').map((part) => encodeURIComponent(part)).join('/');
+  return `https://github.com/${repo}/archive/refs/heads/${ref}.zip`;
+}
+
 function makeArchive(goodDir, name) {
   fs.mkdirSync(ARCHIVES_DIR, { recursive: true });
   const out = path.join(ARCHIVES_DIR, `${name}.zip`);
@@ -800,6 +816,7 @@ async function syncRepo(entry, prevState, tracker, name, tools) {
     anomalies: [],
     error: false,
     archive: null,
+    archiveUrl: null,
     description: null,
     completion: null,
     archived: false,
@@ -955,6 +972,20 @@ async function syncRepo(entry, prevState, tracker, name, tools) {
     rec.sourceOnly = !isDir(path.join(goodDir, '.git'));
     if (rec.archiveLines === null) rec.archiveLines = countCodeLinesInDir(goodDir).lines;
     rec.archive = makeArchive(goodDir, name);
+    if (rec.archive) {
+      const archiveBytes = archiveSizeOf(rec.archive);
+      const publishable = rec.status === 'accessible' && !rec.delisted && !rec.observation;
+      if (archiveBytes !== null && archiveBytes > ARCHIVE_SIZE_LIMIT && publishable) {
+        // Too large for GitHub Pages: keep the cache entry, but serve GitHub's
+        // own zip from the page instead of uploading a copy.
+        fs.rmSync(path.join(ARCHIVES_DIR, rec.archive), { force: true });
+        rec.archiveUrl = githubZipUrl(entry.repo, rec.branch);
+        console.log(
+          `  > ${entry.repo}: zip ${fmtBytes(archiveBytes)} > 100 MB, linking ${rec.archiveUrl} instead of publishing a copy`,
+        );
+        rec.archive = null;
+      }
+    }
   } else if (rec.observation) {
     console.log(`  ! ${entry.repo}: frozen without a good copy (deployed archive unavailable)`);
   }
@@ -1096,7 +1127,9 @@ function generatePages(results) {
 
       const archiveCell = rec.archive
         ? `<a class="btn" href="archives/${encodeURIComponent(rec.archive)}" download>下载${archiveSize ? ` · ${fmtBytes(archiveSize)}` : ''}</a>`
-        : '<span class="muted">—</span>';
+        : rec.archiveUrl
+          ? `<a class="btn" href="${attrEscape(rec.archiveUrl)}" target="_blank" rel="noopener" title="副本 zip 超过 100 MB，不发布站内副本，直接使用 GitHub 的 zip（仍照常存 cache）">GitHub ZIP</a>`
+          : '<span class="muted">—</span>';
 
       const search = `${displayName} ${rec.id || ''} ${fullDesc}`.toLowerCase();
       const empty = isPrivate ? ' empty' : '';
@@ -1371,6 +1404,7 @@ ${rows}
   <summary>说明与图例</summary>
   <p><b>当前行数</b>为远端最新提交的有效代码行（不含空行和整行注释）；<b>归档行数</b>为页面提供下载的副本的行数；<b>±</b> 为当前相对归档的差值，红色表示归档副本比当前多（冻结的旧副本）。</p>
   <p><b>可访问</b> 正常获取；<b>不可访问</b> 当前无法获取；<b>私有</b> portwatch 收录但没有公开仓库/代码；<b>镜像</b> 原仓库不可访问，副本来自镜像源；<b>已移出 portwatch 列表</b> 不再出现在 tracker 中，但保留；<b>观察 n/3</b> 缩水后每轮增长 &gt;40 行才计入的恢复进度；<b>不可恢复</b> 有效行数跌破基线的 5%；<b>候选</b> 是 portwatch 未收录的候选/副本。</p>
+  <p><b>GitHub ZIP</b> 副本 zip 超过 100 MB，不发布站内副本，按钮直接指向 GitHub 的 zip；该副本仍照常存入 Actions cache。</p>
 </details>
 
 <footer>
@@ -1536,6 +1570,7 @@ ${rows}
       anomalies: rec.anomalies,
       error: rec.error,
       archive: rec.archive || null,
+      archiveUrl: rec.archiveUrl || null,
       archiveSize: archiveSizeOf(rec.archive),
       description: rec.description,
       completion: rec.completion,
@@ -1669,6 +1704,7 @@ async function main() {
         anomalies: ['disappeared'],
         error: true,
         archive: null,
+        archiveUrl: null,
         description: entry.repo,
         completion: null,
         archived: false,

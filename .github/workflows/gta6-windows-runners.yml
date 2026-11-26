@@ -9,11 +9,14 @@ name: GTA6 Windows Runners
 #      (key gta6-repo-v1-<owner>__<name>-<sha>, path .cache/good/<name>).
 #      The last accepted copy is restored from that entry; a new entry is only
 #      written when a new copy is accepted. If an entry is missing, the copy is
-#      taken from the deployed archives/ directory instead.
+#      taken from the deployed archives/ directory instead. A copy whose zip
+#      exceeds 100 MB is still cached, but not deployed: the page links to
+#      GitHub's own archive zip for it (accessible, non-frozen rows only).
 #   3. Freezes a repository when its effective code lines fall below 40% of the
 #      baseline (old copy keeps being served) and recovers it on a strong
 #      rebound or after three rounds of >40-line growth.
-#   4. Packs the repository copies into dist/archives/*.zip.
+#   4. Packs the repository copies into dist/archives/*.zip (skipping the
+#      publish step for copies over 100 MB).
 #   5. Generates the static page dist/index.html + dist/runners.json.
 #   6. Publishes the page to GitHub Pages.
 #
