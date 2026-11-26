@@ -21,6 +21,9 @@ jobs:
       contents: read
       pages: write
       id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -41,13 +44,8 @@ jobs:
       - name: Sync GTA6 Windows runners (download, update, generate page)
         run: node scripts/gta6-windows-runner-sync.mjs
 
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v4
-
-      - name: Upload static page as Pages artifact (publish)
-        uses: actions/upload-pages-artifact@v4
+      - name: Deploy to Github Pages
+        id: deployment
+        uses: Wu-Yijun/actions/.github/actions/deploy@main
         with:
-          path: dist/
-
-      - name: Deploy page to GitHub Pages
-        uses: actions/deploy-pages@v4
+          expire: 300
