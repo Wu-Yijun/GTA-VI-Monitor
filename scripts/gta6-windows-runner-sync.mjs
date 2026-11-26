@@ -611,6 +611,15 @@ function extractZip(zipPath, destDir) {
   return r.status === 0;
 }
 
+/** Materialize the previous copy from the deployed archives/ directory. */
+async function ensureSiteCopy(name, prevState, goodDir) {
+  if (!prevState || !prevState.archive) return false;
+  const zip = await downloadSiteZip(name, prevState);
+  if (!zip) return false;
+  if (!extractZip(zip, goodDir)) return false;
+  return true;
+}
+
 // ---------------- freeze / recovery decision ----------------
 
 function decide(baseline, cur, observation, nowIso) {
@@ -798,6 +807,14 @@ async function syncRepo(entry, prevState, tracker, name, tools) {
       rec.codeLines = cur;
       rec.cacheSha = (prevState && prevState.cacheSha) || null;
       if (cloned) rmrf(workDir);
+      if (!hasGood && (await ensureSiteCopy(name, prevState, goodDir))) {
+        // The cache entry was evicted between runs: recover the previous copy
+        // from the deployed archives so the freeze still has something to serve.
+        hasGood = true;
+        siteCopyFetched = true;
+        rec.sourceOnly = true;
+        if (rec.archiveLines === null) rec.archiveLines = countCodeLinesInDir(goodDir).lines;
+      }
       if (siteCopyFetched) {
         const keySha = remote.sha || (prevState && prevState.headSha) || 'src';
         if (await tools.save(goodDir, `${prefix}${keySha}`)) rec.cacheSha = keySha;
@@ -811,6 +828,14 @@ async function syncRepo(entry, prevState, tracker, name, tools) {
     rec.observation = (prevState && prevState.observation) || null;
     rec.archiveLines = baseline;
     rec.cacheSha = (prevState && prevState.cacheSha) || null;
+    if (!hasGood && (await ensureSiteCopy(name, prevState, goodDir))) {
+      // The repository vanished while its cache entry was missing: keep the
+      // copy that the previous deployment was serving.
+      hasGood = true;
+      siteCopyFetched = true;
+      rec.sourceOnly = true;
+      if (rec.archiveLines === null) rec.archiveLines = countCodeLinesInDir(goodDir).lines;
+    }
     if (siteCopyFetched) {
       const keySha = (prevState && prevState.headSha) || 'src';
       if (await tools.save(goodDir, `${prefix}${keySha}`)) rec.cacheSha = keySha;
