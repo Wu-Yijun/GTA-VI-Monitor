@@ -1,20 +1,22 @@
 name: GTA6 Anomaly Refresh (one-off)
 
-# One-off workflow for repositories that disappeared from GitHub.
+# One-off workflow for the published list.
 #
 # It runs the normal sync first (so dist/archives already has every current
-# copy and dist/runners.json is fresh), then downloads a newer copy of the
-# requested anomalous repository from a known mirror source, writes that copy
-# into the same per-repo Actions cache entry the sync uses, and regenerates the
-# page.
+# copy and dist/runners.json is fresh), then:
+#   - restores realdody/americas-recomp from Frollir/americas-recomp
+#     (xbox-series; the original main was an empty initial commit);
+#   - adds the 14 i95-ranked repositories that portwatch does not list;
+#   - adds darkworldhm/victory-fork-darkworldhm from its public GitHub repo
+#     (its HEAD matches the copy i95 vendors), replacing the private-only row;
+# and finally regenerates the page.
 #
 # No file is committed to this repository: the copies live in the per-repo
 # caches and in the Pages artifact only. Delete this workflow after the run.
 #
-# Sources (see scripts/gta6-anomaly-refresh.mjs):
-#   realdody/americas-recomp   <- Frollir/americas-recomp (xbox-series; the
-#                                 original main was an empty initial commit)
-#   zohaiblazuli/GrandTheftXbox -> no mirror found (skipped)
+# The source list is hardcoded in scripts/gta6-anomaly-refresh.mjs on purpose:
+# it is a one-off list, not a general importer.
+#
 # The earlier mirrors (ztrx / keylime / Leonida / xlaunch-vi) are already in
 # the caches and the deployed state; this refresh leaves them untouched.
 
@@ -29,7 +31,7 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     permissions:
       contents: read
       pages: write

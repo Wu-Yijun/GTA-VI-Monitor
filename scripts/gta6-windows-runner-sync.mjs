@@ -824,6 +824,7 @@ async function syncRepo(entry, prevState, tracker, name, tools) {
     mirror: (prevState && prevState.mirror) || null,
     name: entry.name || (prevState && prevState.name) || null,
     delisted: Boolean(entry.delisted),
+    extra: Boolean(entry.extra || (prevState && prevState.extra)),
   };
 
   const goodDir = path.join(GOOD_ROOT, name);
@@ -965,6 +966,9 @@ async function syncRepo(entry, prevState, tracker, name, tools) {
   if (rec.delisted) rec.anomalies.push('delisted');
 
   rec.description = descriptionFor(entry, tracker, meta, prevState);
+  // Keep the curated description the one-off refresh wrote for rows that are
+  // not in the tracker (GitHub's own description is often just a slogan).
+  if (rec.extra && prevState && prevState.description) rec.description = prevState.description;
   rec.completion = completionScore(entry, tracker, prevState);
 
   if (hasGood) {
@@ -1576,6 +1580,7 @@ ${rows}
       completion: rec.completion,
       sourceOnly: rec.sourceOnly,
       mirror: rec.mirror || null,
+      extra: Boolean(rec.extra),
     })),
   };
   fs.writeFileSync(RUNNERS_JSON, JSON.stringify(runnersJson, null, 2));
@@ -1617,6 +1622,20 @@ function mergeEntries(trackerEntries, previousRecords, stale = false) {
 
   const retainedPrivate = [];
   for (const rec of previousRecords) {
+    // Rows added outside the tracker by the one-off refresh stay in the list
+    // without the "delisted" badge; the regular sync refreshes them normally.
+    // Once the tracker lists the same repository, its own entry wins.
+    if (rec.extra && rec.repo && !newByKey.has(rec.repo)) {
+      entries.push({
+        repo: rec.repo,
+        source: rec.source || 'candidate',
+        id: rec.id || null,
+        name: rec.name || null,
+        extra: true,
+        prev: rec,
+      });
+      continue;
+    }
     const next = rec.id ? newById.get(rec.id) : null;
     if (next && next.repo) continue; // now public (or renamed public): the new entry wins
     if (!next && newByKey.has(keyOf(rec))) continue; // still listed under the same key

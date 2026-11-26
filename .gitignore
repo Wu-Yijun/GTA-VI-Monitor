@@ -4,3 +4,4 @@ dist/
 
 # Temporary analysis artifacts (local only)
 .tmp/
+/.dsh-*/
