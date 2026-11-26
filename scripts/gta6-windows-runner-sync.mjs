@@ -60,6 +60,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 
 // ---------------- configuration ----------------
 
@@ -91,6 +92,7 @@ const ANOMALY_LABELS = {
   disappeared: '消失',
   frozen: '冻结',
   unrecoverable: '不可恢复',
+  mirrored: '镜像',
 };
 const MENTION = /windows|native|wine|translation|compat|runtime|layer|emulator|shim|hook|x64|rust/i;
 
@@ -715,6 +717,7 @@ async function syncRepo(entry, prevState, tracker, name, tools) {
     completion: null,
     archived: false,
     sourceOnly: false,
+    mirror: (prevState && prevState.mirror) || null,
   };
 
   const goodDir = path.join(GOOD_ROOT, name);
@@ -852,6 +855,8 @@ async function syncRepo(entry, prevState, tracker, name, tools) {
     if (rec.observation.dead) rec.anomalies.push('unrecoverable');
   }
 
+  if (rec.mirror && rec.status === 'inaccessible') rec.anomalies.push('mirrored');
+
   rec.description = descriptionFor(entry, tracker, meta);
   rec.completion = completionScore(entry, tracker);
 
@@ -958,7 +963,7 @@ code { background: #f5f5f5; padding: 0.1rem 0.2rem; border-radius: 0.2rem; }
 ${rows}
   </tbody>
 </table>
-<p class="legend">图例：<b class="badge ok">可访问</b> 可正常获取；<b class="badge bad">不可访问</b> 当前无法获取（消失）；<b class="badge anom">代码大量删除</b> 有效行数跌破基线的 40%，已冻结为旧副本；<b class="badge anom">消失</b> 仓库已消失；<b class="badge anom">冻结</b> 已归档或其他异常状态；<b class="badge anom">不可恢复</b> 有效行数跌破基线的 5%。</p>
+<p class="legend">图例：<b class="badge ok">可访问</b> 可正常获取；<b class="badge bad">不可访问</b> 当前无法获取（消失）；<b class="badge anom">镜像</b> 原仓库不可访问，副本来自镜像源；<b class="badge anom">代码大量删除</b> 有效行数跌破基线的 40%，已冻结为旧副本；<b class="badge anom">消失</b> 仓库已消失；<b class="badge anom">冻结</b> 已归档或其他异常状态；<b class="badge anom">不可恢复</b> 有效行数跌破基线的 5%。</p>
 </body>
 </html>`;
 
@@ -992,6 +997,7 @@ ${rows}
       description: rec.description,
       completion: rec.completion,
       sourceOnly: rec.sourceOnly,
+      mirror: rec.mirror || null,
     })),
   };
   fs.writeFileSync(RUNNERS_JSON, JSON.stringify(runnersJson, null, 2));
@@ -1093,7 +1099,28 @@ async function main() {
   );
 }
 
-main().catch((error) => {
-  console.error('FATAL', error);
-  process.exit(1);
-});
+const IS_MAIN = Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (IS_MAIN) {
+  main().catch((error) => {
+    console.error('FATAL', error);
+    process.exit(1);
+  });
+}
+
+export {
+  ANOMALY_LABELS,
+  ARCHIVES_DIR,
+  CACHE_KEY_PREFIX,
+  DIST_DIR,
+  GOOD_ROOT,
+  INDEX_HTML,
+  METRIC_VERSION,
+  RUNNERS_JSON,
+  SITE_URL,
+  assignNames,
+  countCodeLinesInDir,
+  generatePages,
+  makeArchive,
+  makeCacheTools,
+};

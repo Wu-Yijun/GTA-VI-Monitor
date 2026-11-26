@@ -1,0 +1,107 @@
+name: GTA6 Anomaly Refresh (one-off)
+
+# One-off workflow for repositories that disappeared from GitHub.
+#
+# It runs the normal sync first (so dist/archives already has every current
+# copy and dist/runners.json is fresh), then downloads a newer copy of each
+# anomalous repository from a known mirror source, writes that copy into the
+# same per-repo Actions cache entry the sync uses, and regenerates the page.
+#
+# No file is committed to this repository: the copies live in the per-repo
+# caches and in the Pages artifact only. Delete this workflow after the run.
+#
+# Sources (see scripts/gta6-anomaly-refresh.mjs):
+#   Zettrox/ztrx               <- Beaver6513/ztrx-lowvram (main)
+#   ethan00013/keylime         <- Software Heritage snapshot (incremental)
+#   ItsNotRexed/Leonida        <- Guernica4u/GTA6-PC-Port-Archive (leonida-old)
+#   JPTuba9/xlaunch-vi         <- barbosa64x/xlaunch-vi (gtavi/native-gfx)
+#   zohaiblazuli/GrandTheftXbox -> no mirror found (skipped)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  # Same group as the regular sync: never let both write caches/state at once.
+  group: gta6-runners
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install cache toolkit (runtime only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEPS="${RUNNER_TEMP}/gta6-deps"
+          rm -rf "$DEPS"
+          mkdir -p "$DEPS"
+          cd "$DEPS"
+          printf '{"name":"gta6-cache-deps","private":true}\n' > package.json
+          pnpm add @actions/cache@^4 @actions/core@^1
+          echo "GTA6_CACHE_DEPS=$DEPS" >> "$GITHUB_ENV"
+
+      # The runner injects the cache service vars only into JS actions.
+      - name: Read cache service environment
+        id: cache-env
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const names = [
+              'ACTIONS_RUNTIME_TOKEN',
+              'ACTIONS_CACHE_URL',
+              'ACTIONS_RESULTS_URL',
+              'ACTIONS_CACHE_SERVICE_V2',
+              'ACTIONS_CACHE_MODE'
+            ];
+            if (process.env.ACTIONS_RUNTIME_TOKEN) core.setSecret(process.env.ACTIONS_RUNTIME_TOKEN);
+            for (const name of names) core.setOutput(name.toLowerCase(), process.env[name] || '');
+            core.info(`cache service env: ${names.filter((name) => process.env[name]).join(', ') || 'none'}`);
+
+      - name: Sync current state (all repositories)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GTA6_REQUIRE_CACHE: '1'
+          ACTIONS_RUNTIME_TOKEN: ${{ steps.cache-env.outputs.actions_runtime_token }}
+          ACTIONS_CACHE_URL: ${{ steps.cache-env.outputs.actions_cache_url }}
+          ACTIONS_RESULTS_URL: ${{ steps.cache-env.outputs.actions_results_url }}
+          ACTIONS_CACHE_SERVICE_V2: ${{ steps.cache-env.outputs.actions_cache_service_v2 }}
+          ACTIONS_CACHE_MODE: ${{ steps.cache-env.outputs.actions_cache_mode }}
+        run: node scripts/gta6-windows-runner-sync.mjs
+
+      - name: Refresh anomalous repositories from mirrors
+        env:
+          GTA6_REQUIRE_CACHE: '1'
+          ACTIONS_RUNTIME_TOKEN: ${{ steps.cache-env.outputs.actions_runtime_token }}
+          ACTIONS_CACHE_URL: ${{ steps.cache-env.outputs.actions_cache_url }}
+          ACTIONS_RESULTS_URL: ${{ steps.cache-env.outputs.actions_results_url }}
+          ACTIONS_CACHE_SERVICE_V2: ${{ steps.cache-env.outputs.actions_cache_service_v2 }}
+          ACTIONS_CACHE_MODE: ${{ steps.cache-env.outputs.actions_cache_mode }}
+        run: node scripts/gta6-anomaly-refresh.mjs
+
+      - name: Deploy to Github Pages
+        id: deployment
+        uses: Wu-Yijun/actions/.github/actions/deploy@main
+        with:
+          expire: 300
