@@ -256,7 +256,11 @@ async function main() {
 
   const state = await readState();
   const records = new Map();
-  for (const record of state.repos || []) if (record && record.repo) records.set(record.repo, record);
+  for (const record of state.repos || []) {
+    if (!record) continue;
+    const key = record.repo || (record.id ? `private:${record.id}` : null);
+    if (key) records.set(key, record);
+  }
 
   const tools = makeCacheTools();
   if (!tools.enabled) throw new Error('cache service is not available (run through the workflow)');

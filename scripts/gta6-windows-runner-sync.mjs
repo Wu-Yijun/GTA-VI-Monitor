@@ -20,6 +20,15 @@
  *
  * The previous run's index/baselines/observation progress are read back from
  * the deployed https://wu-yijun.github.io/GTA-VI-Monitor/runners.json.
+ *
+ * Tracker
+ * -------
+ * The raw tracker.json is cached in the Actions cache
+ * (gta6-tracker-v1-<content hash>) and used as a fallback when
+ * portwatch-vi.xyz is unreachable. Entries that disappear from the tracker are
+ * retained and marked "delisted" instead of being dropped; private efforts
+ * (repo null) are shown as metadata-only rows with a "private" badge.
+ *
  * Fallbacks:
  *   - cache entry missing  -> the copy is taken from the deployed
  *                             archives/<name>.zip (same tree, no .git);
@@ -71,6 +80,8 @@ const CACHE_ROOT = path.join(ROOT, '.cache');
 const GOOD_ROOT = path.join(CACHE_ROOT, 'good');
 const WORK_ROOT = path.join(CACHE_ROOT, 'work');
 const TMP_ROOT = path.join(CACHE_ROOT, 'tmp');
+const TRACKER_CACHE_DIR = path.join(CACHE_ROOT, 'tracker');
+const TRACKER_KEY_PREFIX = 'gta6-tracker-v1-';
 const DIST_DIR = path.join(ROOT, 'dist');
 const ARCHIVES_DIR = path.join(DIST_DIR, 'archives');
 const RUNNERS_JSON = path.join(DIST_DIR, 'runners.json');
@@ -93,6 +104,7 @@ const ANOMALY_LABELS = {
   frozen: '冻结',
   unrecoverable: '不可恢复',
   mirrored: '镜像',
+  delisted: '已移出 portwatch 列表',
 };
 const MENTION = /windows|native|wine|translation|compat|runtime|layer|emulator|shim|hook|x64|rust/i;
 
@@ -389,47 +401,73 @@ function fileCount(dir) {
 
 // ---------------- tracker + scoring (unchanged behaviour) ----------------
 
-async function downloadTracker() {
+async function downloadTracker(tools) {
+  const restoredKey = await tools.restore(TRACKER_CACHE_DIR, `${TRACKER_KEY_PREFIX}latest`, TRACKER_KEY_PREFIX);
+  const cachedFile = path.join(TRACKER_CACHE_DIR, 'tracker.json');
+
   const response = await fetchWithRetry(
     TRACKER_URL,
     { headers: { 'User-Agent': 'gta6-runners-sync' } },
     3,
     30000,
   );
-  if (!response || !response.ok) {
-    throw new Error(`tracker download failed: HTTP ${response ? response.status : 'network error'}`);
+
+  if (response && response.ok) {
+    const text = await response.text();
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (error) {
+      throw new Error(`tracker JSON parse failed: ${error.message}`);
+    }
+    fs.mkdirSync(TRACKER_CACHE_DIR, { recursive: true });
+    fs.writeFileSync(cachedFile, text);
+    const hash = crypto.createHash('sha256').update(text).digest('hex').slice(0, 16);
+    const key = `${TRACKER_KEY_PREFIX}${hash}`;
+    if (restoredKey !== key) await tools.save(TRACKER_CACHE_DIR, key);
+    return { tracker: parsed, stale: false };
   }
-  return response.json();
+
+  if (fs.existsSync(cachedFile)) {
+    console.warn('WARN: tracker download failed; using the cached tracker.json (stale, missing entries are not marked as delisted)');
+    return { tracker: JSON.parse(fs.readFileSync(cachedFile, 'utf8')), stale: true };
+  }
+
+  throw new Error(`tracker download failed: HTTP ${response ? response.status : 'network error'} (no cached tracker)`);
 }
 
 function extractRepos(tracker) {
   const picked = [];
 
+  // Every effort is authoritative, including private builds without a repository.
   for (const effort of tracker.efforts || []) {
-    const repo = effort && typeof effort.repo === 'string' ? effort.repo : null;
-    if (!repo) continue;
-    const text = [effort.id, effort.name, effort.approach || '', effort.target || '', effort.summary || '', effort.tier || ''].join(' ');
-    const isWindows = MENTION.test(text);
-    const isGta = /gta\s*6|gta6|gta\s*vi|grand theft auto vi|xbox series/i.test(text) || (effort.id && /gta|vi/i.test(effort.id));
-    if (isWindows && isGta) picked.push({ repo, source: 'effort', id: effort.id });
+    if (!effort) continue;
+    if (typeof effort.repo !== 'string' || !effort.repo) {
+      if (effort.id) {
+        picked.push({ repo: null, source: 'effort', id: effort.id, name: effort.name || effort.id, private: true });
+      }
+      continue;
+    }
+    picked.push({ repo: effort.repo, source: 'effort', id: effort.id || null, name: effort.name || effort.id || null });
   }
 
   for (const candidate of tracker.candidates || []) {
     if (!candidate || typeof candidate.repo !== 'string') continue;
     const text = [candidate.name || '', candidate.description || '', candidate.language || ''].join(' ');
     if (MENTION.test(text) || /gta\s*6|gta6|gta\s*vi|windows|xbox series|x64|native/i.test(text)) {
-      picked.push({ repo: candidate.repo, source: 'candidate', id: candidate.name || null });
+      picked.push({ repo: candidate.repo, source: 'candidate', id: candidate.name || null, name: candidate.name || null });
     }
   }
 
   const seen = new Set();
   const repos = [];
   for (const pick of picked) {
-    if (seen.has(pick.repo)) continue;
-    seen.add(pick.repo);
+    const key = pick.repo || `private:${pick.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     repos.push(pick);
   }
-  repos.sort((a, b) => a.repo.localeCompare(b.repo));
+  repos.sort((a, b) => String(a.repo || a.name || '').localeCompare(String(b.repo || b.name || '')));
   return repos;
 }
 
@@ -440,21 +478,28 @@ function trackerObjectsByRepo(tracker) {
   return byRepo;
 }
 
-function descriptionFor(entry, tracker, meta) {
+function descriptionFor(entry, tracker, meta, prev) {
   const byRepo = trackerObjectsByRepo(tracker);
-  const obj = byRepo.get(entry.repo);
+  const obj =
+    (entry.repo && byRepo.get(entry.repo)) ||
+    (entry.id && (tracker.efforts || []).find((item) => item && item.id === entry.id)) ||
+    null;
   let desc = '';
   if (obj) desc = obj.summary || obj.approach || obj.description || obj.name || '';
   if (!desc && meta && meta.description) desc = meta.description;
-  return String(desc || entry.repo).slice(0, 160);
+  if (!desc && prev && prev.description) desc = prev.description;
+  return String(desc || entry.repo || entry.name || entry.id || 'private build').slice(0, 160);
 }
 
-function completionScore(entry, tracker) {
+function completionScore(entry, tracker, prev) {
   // Site definition (4lwayz/portwatch-vi, assets/js/scoring.js: scoreEffort):
   // efforts are scored 0-100 from ground work + ladder milestones + playing-well tracks.
   const byRepo = trackerObjectsByRepo(tracker);
-  const obj = byRepo.get(entry.repo);
-  if (!obj || !obj.gta) return null; // site scores efforts; candidates have no completion here
+  const obj =
+    (entry.repo && byRepo.get(entry.repo)) ||
+    (entry.id && (tracker.efforts || []).find((item) => item && item.id === entry.id)) ||
+    null;
+  if (!obj || !obj.gta) return prev && prev.completion != null ? prev.completion : null;
   return scoreEffort(obj).score;
 }
 
@@ -569,6 +614,10 @@ async function fetchRepoMeta(repoPath) {
 
 // ---------------- previous state + deployed archive fallback ----------------
 
+function keyOf(record) {
+  return record.repo || `private:${record.id}`;
+}
+
 async function fetchPreviousState() {
   const response = await fetchWithRetry(
     `${SITE_URL}runners.json`,
@@ -581,7 +630,7 @@ async function fetchPreviousState() {
     const json = await response.json();
     const repos = {};
     for (const rec of json.repos || []) {
-      if (rec && typeof rec.repo === 'string') repos[rec.repo] = rec;
+      if (rec && (typeof rec.repo === 'string' || rec.id)) repos[keyOf(rec)] = rec;
     }
     return { repos, metricVersion: Number.isFinite(json.metricVersion) ? json.metricVersion : null };
   } catch {
@@ -697,6 +746,39 @@ function makeArchive(goodDir, name) {
 
 // ---------------- per-repository sync ----------------
 
+function keyOfEntry(entry) {
+  return entry.repo || `private:${entry.id}`;
+}
+
+function privateRecord(entry, tracker, prev) {
+  const effort = (tracker.efforts || []).find((item) => item && item.id === entry.id) || null;
+  const rec = {
+    repo: null,
+    name: entry.name || (effort && effort.name) || (prev && prev.name) || entry.id || null,
+    id: entry.id || (prev && prev.id) || null,
+    source: 'effort',
+    branch: null,
+    headSha: null,
+    cacheSha: null,
+    status: 'private',
+    files: 0,
+    codeLines: null,
+    archiveLines: null,
+    observation: null,
+    anomalies: [],
+    error: false,
+    archive: null,
+    description: (effort && effort.summary) || (prev && prev.description) || entry.name || entry.id || 'private build',
+    completion: effort ? scoreEffort(effort).score : prev && prev.completion != null ? prev.completion : null,
+    archived: false,
+    sourceOnly: false,
+    mirror: null,
+    delisted: Boolean(entry.delisted),
+  };
+  if (rec.delisted) rec.anomalies.push('delisted');
+  return rec;
+}
+
 async function syncRepo(entry, prevState, tracker, name, tools) {
   const rec = {
     repo: entry.repo,
@@ -718,6 +800,8 @@ async function syncRepo(entry, prevState, tracker, name, tools) {
     archived: false,
     sourceOnly: false,
     mirror: (prevState && prevState.mirror) || null,
+    name: entry.name || (prevState && prevState.name) || null,
+    delisted: Boolean(entry.delisted),
   };
 
   const goodDir = path.join(GOOD_ROOT, name);
@@ -856,9 +940,10 @@ async function syncRepo(entry, prevState, tracker, name, tools) {
   }
 
   if (rec.mirror && rec.status === 'inaccessible') rec.anomalies.push('mirrored');
+  if (rec.delisted) rec.anomalies.push('delisted');
 
-  rec.description = descriptionFor(entry, tracker, meta);
-  rec.completion = completionScore(entry, tracker);
+  rec.description = descriptionFor(entry, tracker, meta, prevState);
+  rec.completion = completionScore(entry, tracker, prevState);
 
   if (hasGood) {
     rec.files = fileCount(goodDir);
@@ -884,7 +969,11 @@ function fmtNum(value) {
 }
 
 function sortedResults(results) {
-  return [...results].sort((a, b) => ((b.completion ?? 0) - (a.completion ?? 0)) || a.repo.localeCompare(b.repo));
+  return [...results].sort(
+    (a, b) =>
+      (b.completion ?? 0) - (a.completion ?? 0) ||
+      String(a.repo || a.name || a.id || '').localeCompare(String(b.repo || b.name || b.id || '')),
+  );
 }
 
 function observationCell(rec) {
@@ -896,23 +985,29 @@ function observationCell(rec) {
 function generatePages(results) {
   const rows = sortedResults(results)
     .map((rec) => {
-      const desc = (rec.description || rec.repo).slice(0, 140);
+      const desc = (rec.description || rec.repo || rec.name || rec.id || '').slice(0, 140);
       const statusBadge =
         rec.status === 'accessible'
           ? '<span class="badge ok">可访问</span>'
-          : '<span class="badge bad">不可访问</span>';
+          : rec.status === 'private'
+            ? '<span class="badge priv">私有</span>'
+            : '<span class="badge bad">不可访问</span>';
       const anomalyBadges = rec.anomalies
         .map((anomaly) => `<span class="badge anom">${htmlEscape(ANOMALY_LABELS[anomaly] || anomaly)}</span>`)
         .join(' ');
       const archive = rec.archive ? `<a href="archives/${rec.archive}" download>下载副本</a>` : '-';
       const completion = rec.completion === null || rec.completion === undefined ? '-' : `${rec.completion}%`;
+      const repoCell = rec.repo
+        ? `<a href="https://github.com/${htmlEscape(rec.repo)}" target="_blank" rel="noopener">${htmlEscape(rec.repo)}</a>`
+        : `<span class="private-name">${htmlEscape(rec.name || rec.id || 'private build')}</span>`;
+      const filesCell = rec.status === 'private' ? '-' : String(rec.files || 0);
       return `  <tr>
-    <td><a href="https://github.com/${htmlEscape(rec.repo)}" target="_blank" rel="noopener">${htmlEscape(rec.repo)}</a></td>
+    <td>${repoCell}</td>
     <td>${statusBadge}${anomalyBadges}</td>
     <td class="desc">${htmlEscape(desc)}</td>
     <td class="num">${completion}</td>
     <td>${htmlEscape(rec.branch || '-')}</td>
-    <td class="num">${rec.files || 0}</td>
+    <td class="num">${filesCell}</td>
     <td class="num">${fmtNum(rec.codeLines)}</td>
     <td class="num">${fmtNum(rec.archiveLines)}</td>
     <td class="num">${observationCell(rec)}</td>
@@ -941,6 +1036,8 @@ td.desc { min-width: 16rem; }
 .badge.ok { background: #dcfce7; color: #15803d; }
 .badge.bad { background: #fee2e2; color: #b91c1c; }
 .badge.anom { background: #fef3c7; color: #b45309; }
+.badge.priv { background: #e0e7ff; color: #4338ca; }
+.private-name { color: #4338ca; font-weight: 600; }
 .note, .legend { color: #555; font-size: 0.85rem; }
 code { background: #f5f5f5; padding: 0.1rem 0.2rem; border-radius: 0.2rem; }
 </style>
@@ -950,6 +1047,7 @@ code { background: #f5f5f5; padding: 0.1rem 0.2rem; border-radius: 0.2rem; }
 <div class="meta">
   <span>总仓库数：<b>${results.length}</b></span>
   <span>可访问：<b>${results.filter((rec) => rec.status === 'accessible').length}</b></span>
+  <span>私有：<b>${results.filter((rec) => rec.status === 'private').length}</b></span>
   <span>异常仓库：<b>${results.filter((rec) => rec.anomalies.length).length}</b></span>
   <span>错误标记：<b>${results.filter((rec) => rec.error).length}</b></span>
   <span>生成时间：<b>${htmlEscape(new Date().toISOString())}</b></span>
@@ -963,7 +1061,7 @@ code { background: #f5f5f5; padding: 0.1rem 0.2rem; border-radius: 0.2rem; }
 ${rows}
   </tbody>
 </table>
-<p class="legend">图例：<b class="badge ok">可访问</b> 可正常获取；<b class="badge bad">不可访问</b> 当前无法获取（消失）；<b class="badge anom">镜像</b> 原仓库不可访问，副本来自镜像源；<b class="badge anom">代码大量删除</b> 有效行数跌破基线的 40%，已冻结为旧副本；<b class="badge anom">消失</b> 仓库已消失；<b class="badge anom">冻结</b> 已归档或其他异常状态；<b class="badge anom">不可恢复</b> 有效行数跌破基线的 5%。</p>
+<p class="legend">图例：<b class="badge ok">可访问</b> 可正常获取；<b class="badge bad">不可访问</b> 当前无法获取（消失）；<b class="badge priv">私有</b> portwatch 收录但没有公开仓库/代码；<b class="badge anom">镜像</b> 原仓库不可访问，副本来自镜像源；<b class="badge anom">已移出 portwatch 列表</b> 该项目不再出现在 tracker 中，我们保留并继续标记；<b class="badge anom">代码大量删除</b> 有效行数跌破基线的 40%，已冻结为旧副本；<b class="badge anom">消失</b> 仓库已消失；<b class="badge anom">冻结</b> 已归档或其他异常状态；<b class="badge anom">不可恢复</b> 有效行数跌破基线的 5%。</p>
 </body>
 </html>`;
 
@@ -971,20 +1069,24 @@ ${rows}
   fs.writeFileSync(INDEX_HTML, html);
 
   const runnersJson = {
-    schema: 2,
+    schema: 3,
     metricVersion: METRIC_VERSION,
     generatedAt: new Date().toISOString(),
     trackerUrl: TRACKER_URL,
     total: results.length,
     accessible: results.filter((rec) => rec.status === 'accessible').length,
+    private: results.filter((rec) => rec.status === 'private').length,
     anomalies: results.filter((rec) => rec.anomalies.length).length,
     errors: results.filter((rec) => rec.error).length,
     repos: sortedResults(results).map((rec) => ({
-      repo: rec.repo,
+      repo: rec.repo || null,
+      name: rec.name || null,
       source: rec.source,
       id: rec.id,
       branch: rec.branch,
       status: rec.status,
+      private: rec.status === 'private',
+      delisted: Boolean(rec.delisted),
       headSha: rec.headSha,
       cacheSha: rec.cacheSha,
       files: rec.files,
@@ -1009,6 +1111,7 @@ function assignNames(entries) {
   const names = new Map();
   const used = new Set();
   for (const entry of entries) {
+    if (!entry.repo) continue;
     let name = entry.repo.replace(/[^A-Za-z0-9_-]/g, '__');
     if (used.has(name)) {
       name = `${name}-${crypto.createHash('sha1').update(entry.repo).digest('hex').slice(0, 8)}`;
@@ -1021,6 +1124,44 @@ function assignNames(entries) {
 
 // ---------------- main ----------------
 
+function mergeEntries(trackerEntries, previousRecords, stale = false) {
+  const previousPublicIds = new Set(previousRecords.filter((rec) => rec.repo && rec.id).map((rec) => rec.id));
+  const newByKey = new Map(trackerEntries.map((entry) => [keyOfEntry(entry), entry]));
+  const newById = new Map(trackerEntries.filter((entry) => entry.id).map((entry) => [entry.id, entry]));
+
+  const entries = [];
+  for (const entry of trackerEntries) {
+    if (entry.private && entry.id && previousPublicIds.has(entry.id)) {
+      // The project used to be public and is private now. Keep the public copy
+      // (added below as a retained entry) instead of adding a duplicate row.
+      continue;
+    }
+    entries.push(entry);
+  }
+
+  const retainedPrivate = [];
+  for (const rec of previousRecords) {
+    const next = rec.id ? newById.get(rec.id) : null;
+    if (next && next.repo) continue; // now public (or renamed public): the new entry wins
+    if (!next && newByKey.has(keyOf(rec))) continue; // still listed under the same key
+    if (next && !next.repo && !rec.repo) continue; // still private under the same key
+    if (rec.repo) {
+      entries.push({
+        repo: rec.repo,
+        source: rec.source || 'retained',
+        id: rec.id || null,
+        name: rec.name || null,
+        delisted: Boolean(rec.delisted) || !stale,
+        prev: rec,
+      });
+    } else {
+      retainedPrivate.push({ ...rec, delisted: Boolean(rec.delisted) || !stale });
+    }
+  }
+
+  return { entries, retainedPrivate };
+}
+
 async function main() {
   const tools = makeCacheTools();
 
@@ -1031,12 +1172,9 @@ async function main() {
   rmrf(DIST_DIR);
   fs.mkdirSync(ARCHIVES_DIR, { recursive: true });
 
-  const tracker = await downloadTracker();
-  const entries = extractRepos(tracker);
-  if (!entries.length) throw new Error('tracker produced no repositories');
-
-  const names = assignNames(entries);
+  const { tracker, stale } = await downloadTracker(tools);
   const previous = await fetchPreviousState();
+
   if (previous.metricVersion !== null && previous.metricVersion !== METRIC_VERSION) {
     console.warn(`WARN: metric version changed (${previous.metricVersion} -> ${METRIC_VERSION}); baselines will be re-counted.`);
     for (const rec of Object.values(previous.repos)) {
@@ -1046,20 +1184,37 @@ async function main() {
     }
   }
 
+  const trackerEntries = extractRepos(tracker);
+  if (!trackerEntries.length) throw new Error('tracker produced no repositories');
+
+  const previousRecords = Object.values(previous.repos);
+  const { entries, retainedPrivate } = mergeEntries(trackerEntries, previousRecords, stale);
+
+  const names = assignNames(entries.filter((entry) => entry.repo));
   console.log(
-    `Repositories: ${entries.length}; previous state: ${Object.keys(previous.repos).length}; cache: ${tools.enabled ? 'on' : 'off'}`,
+    `Repositories: ${entries.length} (+${retainedPrivate.length} retained private); previous state: ${previousRecords.length}; cache: ${tools.enabled ? 'on' : 'off'}; tracker: ${stale ? 'stale cache' : 'live'}`,
   );
 
   const results = [];
   for (const entry of entries) {
+    if (!entry.repo) {
+      const prev = (entry.id && previous.repos[`private:${entry.id}`]) || null;
+      const rec = privateRecord(entry, tracker, prev);
+      results.push(rec);
+      console.log(`PRIV ${rec.name || rec.id} completion=${rec.completion ?? '-'}${rec.delisted ? ' [delisted]' : ''}`);
+      continue;
+    }
+
     const name = names.get(entry.repo);
+    const prev = entry.prev || previous.repos[entry.repo] || null;
     let rec;
     try {
-      rec = await syncRepo(entry, previous.repos[entry.repo] || null, tracker, name, tools);
+      rec = await syncRepo(entry, prev, tracker, name, tools);
     } catch (error) {
       console.error(`  ! ${entry.repo}: ${error.message}`);
       rec = {
         repo: entry.repo,
+        name: entry.name || (prev && prev.name) || null,
         source: entry.source,
         id: entry.id || null,
         branch: null,
@@ -1077,7 +1232,10 @@ async function main() {
         completion: null,
         archived: false,
         sourceOnly: false,
+        mirror: (prev && prev.mirror) || null,
+        delisted: Boolean(entry.delisted),
       };
+      if (entry.delisted) rec.anomalies.push('delisted');
     }
     results.push(rec);
 
@@ -1088,14 +1246,20 @@ async function main() {
     );
   }
 
+  for (const rec of retainedPrivate) {
+    if (rec.delisted) rec.anomalies = Array.from(new Set([...(rec.anomalies || []), 'delisted']));
+    results.push(rec);
+  }
+
   rmrf(WORK_ROOT);
 
   generatePages(results);
 
   const accessible = results.filter((rec) => rec.status === 'accessible').length;
+  const privateCount = results.filter((rec) => rec.status === 'private').length;
   const errorCount = results.filter((rec) => rec.error).length;
   console.log(
-    `\nDone: ${results.length} repos, ${accessible} accessible, ${errorCount} with error flags. Pages: dist/index.html, dist/runners.json`,
+    `\nDone: ${results.length} entries (${accessible} accessible, ${privateCount} private, ${retainedPrivate.length} retained private), ${errorCount} with error flags. Pages: dist/index.html, dist/runners.json`,
   );
 }
 
@@ -1120,7 +1284,9 @@ export {
   SITE_URL,
   assignNames,
   countCodeLinesInDir,
+  extractRepos,
   generatePages,
   makeArchive,
   makeCacheTools,
+  mergeEntries,
 };
