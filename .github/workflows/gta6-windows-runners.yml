@@ -63,10 +63,35 @@ jobs:
           pnpm add @actions/cache@^4 @actions/core@^1
           echo "GTA6_CACHE_DEPS=$DEPS" >> "$GITHUB_ENV"
 
+      # The runner injects ACTIONS_RUNTIME_TOKEN / ACTIONS_CACHE_URL /
+      # ACTIONS_RESULTS_URL only into JS actions (NodeScriptActionHandler),
+      # not into `run:` steps. github-script is a JS action, so it can read
+      # them and pass them to the sync step through step outputs.
+      - name: Read cache service environment
+        id: cache-env
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const names = [
+              'ACTIONS_RUNTIME_TOKEN',
+              'ACTIONS_CACHE_URL',
+              'ACTIONS_RESULTS_URL',
+              'ACTIONS_CACHE_SERVICE_V2',
+              'ACTIONS_CACHE_MODE'
+            ];
+            if (process.env.ACTIONS_RUNTIME_TOKEN) core.setSecret(process.env.ACTIONS_RUNTIME_TOKEN);
+            for (const name of names) core.setOutput(name.toLowerCase(), process.env[name] || '');
+            core.info(`cache service env: ${names.filter((name) => process.env[name]).join(', ') || 'none'}`);
+
       - name: Sync GTA6 Windows runners (per-repo cache, effective code lines)
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GTA6_REQUIRE_CACHE: '1'
+          ACTIONS_RUNTIME_TOKEN: ${{ steps.cache-env.outputs.actions_runtime_token }}
+          ACTIONS_CACHE_URL: ${{ steps.cache-env.outputs.actions_cache_url }}
+          ACTIONS_RESULTS_URL: ${{ steps.cache-env.outputs.actions_results_url }}
+          ACTIONS_CACHE_SERVICE_V2: ${{ steps.cache-env.outputs.actions_cache_service_v2 }}
+          ACTIONS_CACHE_MODE: ${{ steps.cache-env.outputs.actions_cache_mode }}
         run: node scripts/gta6-windows-runner-sync.mjs
 
       - name: Deploy to Github Pages
