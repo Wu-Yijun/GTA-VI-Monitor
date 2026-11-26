@@ -3,19 +3,20 @@ name: GTA6 Anomaly Refresh (one-off)
 # One-off workflow for repositories that disappeared from GitHub.
 #
 # It runs the normal sync first (so dist/archives already has every current
-# copy and dist/runners.json is fresh), then downloads a newer copy of each
-# anomalous repository from a known mirror source, writes that copy into the
-# same per-repo Actions cache entry the sync uses, and regenerates the page.
+# copy and dist/runners.json is fresh), then downloads a newer copy of the
+# requested anomalous repository from a known mirror source, writes that copy
+# into the same per-repo Actions cache entry the sync uses, and regenerates the
+# page.
 #
 # No file is committed to this repository: the copies live in the per-repo
 # caches and in the Pages artifact only. Delete this workflow after the run.
 #
 # Sources (see scripts/gta6-anomaly-refresh.mjs):
-#   Zettrox/ztrx               <- Beaver6513/ztrx-lowvram (main)
-#   ethan00013/keylime         <- Software Heritage snapshot (incremental)
-#   ItsNotRexed/Leonida        <- Guernica4u/GTA6-PC-Port-Archive (leonida-old)
-#   JPTuba9/xlaunch-vi         <- barbosa64x/xlaunch-vi (gtavi/native-gfx)
+#   realdody/americas-recomp   <- Frollir/americas-recomp (xbox-series; the
+#                                 original main was an empty initial commit)
 #   zohaiblazuli/GrandTheftXbox -> no mirror found (skipped)
+# The earlier mirrors (ztrx / keylime / Leonida / xlaunch-vi) are already in
+# the caches and the deployed state; this refresh leaves them untouched.
 
 on:
   workflow_dispatch:

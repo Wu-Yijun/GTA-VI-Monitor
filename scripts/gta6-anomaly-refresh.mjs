@@ -5,18 +5,17 @@
  * One-off refresh for repositories that disappeared from GitHub.
  *
  * It runs after the normal sync (so dist/archives already holds every current
- * copy), downloads a fresh copy of each anomalous repository from a known
- * mirror source, writes that copy into the same per-repo Actions cache entry
- * the sync uses, and regenerates dist/runners.json + dist/index.html.
+ * copy), downloads a fresh copy of the requested anomalous repository from a
+ * known mirror source, writes that copy into the same per-repo Actions cache
+ * entry the sync uses, and regenerates dist/runners.json + dist/index.html.
  *
  * Nothing is written into the repository itself: the copies live in the
  * per-repo caches and in the Pages artifact only.
  *
- * Sources are hard-coded for this one-off:
- *   Zettrox/ztrx          -> Beaver6513/ztrx-lowvram (main)
- *   ethan00013/keylime    -> Software Heritage snapshot (incremental, SWH API)
- *   ItsNotRexed/Leonida   -> Guernica4u/GTA6-PC-Port-Archive (leonida-old/)
- *   JPTuba9/xlaunch-vi    -> barbosa64x/xlaunch-vi (gtavi/native-gfx branch)
+ * This run refreshes only realdody/americas-recomp; the earlier mirror sources
+ * (ztrx, keylime, Leonida, xlaunch-vi) are already in the per-repo caches and
+ * the deployed state, and are left untouched:
+ *   realdody/americas-recomp -> Frollir/americas-recomp (xbox-series branch)
  *   zohaiblazuli/GrandTheftXbox -> no public mirror found (skipped)
  */
 
@@ -44,34 +43,11 @@ const SWH_BASE = 'https://archive.softwareheritage.org/api/1';
 
 const SOURCES = [
   {
-    repo: 'Zettrox/ztrx',
+    repo: 'realdody/americas-recomp',
     kind: 'git',
-    from: 'Beaver6513/ztrx-lowvram',
-    ref: 'main',
-    note: 'low-VRAM fork of ztrx (3 extra files, 2 extra branches)',
-  },
-  {
-    repo: 'ethan00013/keylime',
-    kind: 'swh',
-    revision: '50104809adf27c85bbd8ac03171ca5b827e3755f',
-    root: 'a8fb570378974ef03336fe23f6b847c8cd137d7f',
-    skipTop: ['third_party'],
-    note: 'Software Heritage snapshot; src/docs/tools refreshed, vendored third_party reused',
-  },
-  {
-    repo: 'ItsNotRexed/Leonida',
-    kind: 'git-subdir',
-    from: 'Guernica4u/GTA6-PC-Port-Archive',
-    ref: 'main',
-    subdir: 'leonida-old',
-    note: 'original Leonida, from the GTA6 PC Port Archive',
-  },
-  {
-    repo: 'JPTuba9/xlaunch-vi',
-    kind: 'git',
-    from: 'barbosa64x/xlaunch-vi',
-    ref: 'gtavi/native-gfx',
-    note: 'code branch (the original main branch only had docs)',
+    from: 'Frollir/americas-recomp',
+    ref: 'xbox-series',
+    note: 'preserved fork of the deleted repo; its main was an empty initial commit, the code is on xbox-series',
   },
 ];
 
