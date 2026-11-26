@@ -1,22 +1,35 @@
 name: GTA6 Windows Runners
 
 # Manual workflow: run on demand via GitHub Actions → "Run workflow" → "Run workflow".
+# A cron-job.org trigger dispatches it on a schedule.
 #
 # Every run:
 #   1. Re-downloads https://portwatch-vi.xyz/data/tracker.json and parses it.
-#   2. Downloads/updates each GTA6 Windows-runner repository into .cache/repos/<owner>__<name>
-#      (per-repo cache; repos only grow). Inaccessible repos or repos whose effective
-#      code count shrank keep the cached copy and get an error flag + anomaly.
-#   3. Packs the repository copies into dist/archives/*.zip.
-#   4. Generates the static page dist/index.html (status + info + download-only archive links).
-#   5. Publishes the page to GitHub Pages: actions/upload-pages-artifact + actions/deploy-pages.
+#   2. Uses one GitHub Actions cache entry per repository
+#      (key gta6-repo-v1-<owner>__<name>-<sha>, path .cache/good/<name>).
+#      The last accepted copy is restored from that entry; a new entry is only
+#      written when a new copy is accepted. If an entry is missing, the copy is
+#      taken from the deployed archives/ directory instead.
+#   3. Freezes a repository when its effective code lines fall below 40% of the
+#      baseline (old copy keeps being served) and recovers it on a strong
+#      rebound or after three growth rounds.
+#   4. Packs the repository copies into dist/archives/*.zip.
+#   5. Generates the static page dist/index.html + dist/runners.json.
+#   6. Publishes the page to GitHub Pages.
+#
+# @actions/cache is installed at runtime (no package.json in the repository).
 
 on:
   workflow_dispatch:
 
+concurrency:
+  group: gta6-runners
+  cancel-in-progress: false
+
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
       pages: write
@@ -33,15 +46,27 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Cache repositories and state (per-repo, grow-only)
-        uses: actions/cache@v4
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
         with:
-          path: .cache
-          key: gta6-runners-cache-v1
-          restore-keys: |
-            gta6-runners-cache-
+          version: 9
 
-      - name: Sync GTA6 Windows runners (download, update, generate page)
+      - name: Install cache toolkit (runtime only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEPS="${RUNNER_TEMP}/gta6-deps"
+          rm -rf "$DEPS"
+          mkdir -p "$DEPS"
+          cd "$DEPS"
+          printf '{"name":"gta6-cache-deps","private":true}\n' > package.json
+          pnpm add @actions/cache@^4 @actions/core@^1
+          echo "GTA6_CACHE_DEPS=$DEPS" >> "$GITHUB_ENV"
+
+      - name: Sync GTA6 Windows runners (per-repo cache, effective code lines)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GTA6_REQUIRE_CACHE: '1'
         run: node scripts/gta6-windows-runner-sync.mjs
 
       - name: Deploy to Github Pages
