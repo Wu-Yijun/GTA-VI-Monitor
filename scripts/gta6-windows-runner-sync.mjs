@@ -116,6 +116,7 @@ const ANOMALY_LABELS = {
   unrecoverable: '不可恢复',
   mirrored: '镜像',
   delisted: '已移出 portwatch 列表',
+  private_now: '已转为私有',
 };
 const MENTION = /windows|native|wine|translation|compat|runtime|layer|emulator|shim|hook|x64|rust/i;
 
@@ -964,6 +965,7 @@ async function syncRepo(entry, prevState, tracker, name, tools) {
 
   if (rec.mirror && rec.status === 'inaccessible') rec.anomalies.push('mirrored');
   if (rec.delisted) rec.anomalies.push('delisted');
+  if (entry.privateNow) rec.anomalies.push('private_now');
 
   rec.description = descriptionFor(entry, tracker, meta, prevState);
   // Keep the curated description the one-off refresh wrote for rows that are
@@ -1364,6 +1366,7 @@ footer a { color: var(--accent); }
       <option value="all">全部</option>
       <option value="mirrored">镜像</option>
       <option value="delisted">已移出</option>
+      <option value="private_now">已转为私有</option>
       <option value="disappeared">消失</option>
       <option value="code_deleted">观察</option>
       <option value="unrecoverable">不可恢复</option>
@@ -1407,7 +1410,7 @@ ${rows}
 <details class="legend">
   <summary>说明与图例</summary>
   <p><b>当前行数</b>为远端最新提交的有效代码行（不含空行和整行注释）；<b>归档行数</b>为页面提供下载的副本的行数；<b>±</b> 为当前相对归档的差值，红色表示归档副本比当前多（冻结的旧副本）。</p>
-  <p><b>可访问</b> 正常获取；<b>不可访问</b> 当前无法获取；<b>私有</b> portwatch 收录但没有公开仓库/代码；<b>镜像</b> 原仓库不可访问，副本来自镜像源；<b>已移出 portwatch 列表</b> 不再出现在 tracker 中，但保留；<b>观察 n/3</b> 缩水后每轮增长 &gt;40 行才计入的恢复进度；<b>不可恢复</b> 有效行数跌破基线的 5%；<b>候选</b> 是 portwatch 未收录的候选/副本。</p>
+  <p><b>可访问</b> 正常获取；<b>不可访问</b> 当前无法获取；<b>私有</b> portwatch 收录但没有公开仓库/代码；<b>镜像</b> 原仓库不可访问，副本来自镜像源；<b>已移出 portwatch 列表</b> 不再出现在 tracker 中，但保留；<b>已转为私有</b> 仍收录在 portwatch，但仓库已转回私有/下线，页面保留最后一版公开副本；<b>观察 n/3</b> 缩水后每轮增长 &gt;40 行才计入的恢复进度；<b>不可恢复</b> 有效行数跌破基线的 5%；<b>候选</b> 是 portwatch 未收录的候选/副本。</p>
   <p><b>GitHub ZIP</b> 副本 zip 超过 100 MB，不发布站内副本，按钮直接指向 GitHub 的 zip；该副本仍照常存入 Actions cache。</p>
 </details>
 
@@ -1637,6 +1640,9 @@ function mergeEntries(trackerEntries, previousRecords, stale = false) {
       continue;
     }
     const next = rec.id ? newById.get(rec.id) : null;
+    // Still listed in the tracker, but the repository is private again: keep
+    // the last public copy, drop the "delisted" badge and flag the transition.
+    const nowPrivate = Boolean(next && !next.repo);
     if (next && next.repo) continue; // now public (or renamed public): the new entry wins
     if (!next && newByKey.has(keyOf(rec))) continue; // still listed under the same key
     if (next && !next.repo && !rec.repo) continue; // still private under the same key
@@ -1646,7 +1652,8 @@ function mergeEntries(trackerEntries, previousRecords, stale = false) {
         source: rec.source || 'retained',
         id: rec.id || null,
         name: rec.name || null,
-        delisted: Boolean(rec.delisted) || !stale,
+        delisted: nowPrivate ? false : Boolean(rec.delisted) || !stale,
+        privateNow: nowPrivate,
         prev: rec,
       });
     } else {
