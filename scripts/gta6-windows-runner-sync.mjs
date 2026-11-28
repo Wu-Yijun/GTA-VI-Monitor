@@ -136,8 +136,8 @@ const ARCHIVE_SIZE_LIMIT = 100 * 1024 * 1024;
 // replaced by a short pointer note before the archive is built.
 const DIAGNOSTICS_FILE_LIMIT = 64 * 1024;
 // Media files are removed when a single file is over 1 MB, or when it is over
-// 64 KB and its folder holds more than 5 media files (any size).
-const MEDIA_FILE_LIMIT = 64 * 1024;
+// 128 KB and its folder holds more than 5 media files (any size).
+const MEDIA_FILE_LIMIT = 128 * 1024;
 const MEDIA_SINGLE_LIMIT = 1024 * 1024;
 const MEDIA_FOLDER_MIN_COUNT = 6;
 const MEDIA_EXTENSIONS = new Set([
@@ -870,7 +870,7 @@ function mediaMime(file) {
 
 const MEDIA_NOTICE = [
   "This folder's media files were removed from the archived copy by",
-  'GTA-VI-Monitor because they are larger than 64 KB and the folder holds more',
+  'GTA-VI-Monitor because they are larger than 128 KB and the folder holds more',
   'than 5 media files, or because a single file is larger than 1 MB.',
   '',
   'Files removed:',
