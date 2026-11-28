@@ -1343,7 +1343,9 @@ function generatePages(results) {
   const accessible = results.filter((rec) => rec.status === 'accessible').length;
   const withArchive = results.filter((rec) => rec.archive).length;
   const privateCount = results.filter((rec) => rec.status === 'private').length;
-  const anomalyCount = results.filter((rec) => (rec.anomalies || []).length).length;
+  // Rows removed from the tracker keep their "delisted" badge, but they are
+  // not anomalies of the current list, so they do not count here.
+  const anomalyCount = results.filter((rec) => !rec.delisted && (rec.anomalies || []).length).length;
   const mirrored = results.filter((rec) => (rec.anomalies || []).includes('mirrored')).length;
   const candidateCount = results.filter((rec) => rec.source === 'candidate').length;
 
@@ -1597,7 +1599,7 @@ footer a { color: var(--accent); }
   <div class="stat"><span class="num">${accessible}</span><span class="label">可访问</span></div>
   <div class="stat"><span class="num">${withArchive}</span><span class="label">可下载副本</span></div>
   <div class="stat"><span class="num">${privateCount}</span><span class="label">私有</span></div>
-  <div class="stat warn"><span class="num">${anomalyCount}</span><span class="label">异常</span></div>
+  <div class="stat warn" title="不含已移出 portwatch 列表的条目"><span class="num">${anomalyCount}</span><span class="label">异常</span></div>
   <div class="stat"><span class="num">${mirrored}</span><span class="label">镜像</span></div>
   <div class="stat"><span class="num">${candidateCount}</span><span class="label">候选</span></div>
 </section>
