@@ -5,13 +5,9 @@
  * One-off refresh / extension for the published list.
  *
  * It runs after the normal sync (so dist/archives already holds every current
- * copy) and then:
- *   1. restores repositories that disappeared from GitHub from a known mirror;
- *   2. adds repositories that the portwatch tracker does not list (the i95
- *      ranking), cloned straight from GitHub;
- *   3. replaces the old private-only darkworldhm row with its public
- *      darkworldhm/victory-fork-darkworldhm repository, which exists on GitHub
- *      (its current HEAD matches the copy i95 vendors).
+ * copy) and adds the repositories that the portwatch tracker does not list yet:
+ * each one is cloned straight from GitHub on its own branch and appended as a
+ * candidate row without a completion score.
  *
  * Every copy is written into the same per-repo Actions cache entry the sync
  * uses, and dist/runners.json + dist/index.html are regenerated.
@@ -19,13 +15,12 @@
  * Nothing is written into the repository itself: the copies live in the
  * per-repo caches and in the Pages artifact only.
  *
- * Sources:
- *   realdody/americas-recomp -> Frollir/americas-recomp (xbox-series branch)
- *   14 i95 repositories not tracked by portwatch (cloned from GitHub, added
- *      as candidate rows)
- *   darkworldhm/victory-fork-darkworldhm -> cloned from GitHub like the rest,
- *      added as the public effort row (replaces the private-only row)
- *   zohaiblazuli/GrandTheftXbox -> no public mirror found (skipped)
+ * Sources (the three repositories linked from GTA.html that portwatch does not
+ * track yet; each is cloned from GitHub on its own branch and added as a
+ * candidate row, without a completion score):
+ *   JoshuuDev/victory-amd      (branch: victory-amd)
+ *   CuteBooty/victory-8gb      (default branch)
+ *   XaviFortes/VIctory-RDNA    (default branch)
  */
 
 import crypto from 'node:crypto';
@@ -52,118 +47,27 @@ const SWH_BASE = 'https://archive.softwareheritage.org/api/1';
 
 const SOURCES = [
   {
-    repo: 'realdody/americas-recomp',
+    repo: 'JoshuuDev/victory-amd',
     kind: 'git',
-    from: 'Frollir/americas-recomp',
-    ref: 'xbox-series',
-    note: 'preserved fork of the deleted repo; its main was an empty initial commit, the code is on xbox-series',
-  },
-
-  // i95-ranked repositories (https://github.com/DesignWithTommy/i95) that the
-  // portwatch tracker does not list. They are normal public GitHub
-  // repositories, cloned on their default branch and added as candidate rows;
-  // no completion score exists because the tracker has no effort for them.
-  {
-    repo: 'fablinoo/kelvaroq',
-    kind: 'git',
+    ref: 'victory-amd',
     extra: true,
-    description: '~10 fps in typical views on an RTX 5080; a tester ran 36 min without a crash.',
+    description: 'AMD fork; stutter frames (>1 s) fell from 42% to 14% on an RX 7800 XT, the first prologue room shows walls, dark areas may still lack light.',
   },
   {
-    repo: 'PastiiJay/klbf-lab',
+    repo: 'CuteBooty/victory-8gb',
     kind: 'git',
     extra: true,
-    description: 'Playable through the prologue at ~5.7-7.3 fps; 77 min session on an RX 9070 XT.',
+    description: '8 GB NVIDIA build; a 104-minute run completed the first chapter mission on an RTX 3070 with 32 GB RAM, Series S 1080p preset.',
   },
   {
-    repo: 'realblastex/flamingo',
+    repo: 'XaviFortes/VIctory-RDNA',
     kind: 'git',
     extra: true,
-    description: 'Tuned on an RTX 4070; 9-12 fps in the first scene, 24 min session.',
-  },
-  {
-    repo: 'TaynanGT/Vice-Tay',
-    kind: 'git',
-    extra: true,
-    description: '30 min in the world without a crash, 7.0 fps median on an RTX 4090.',
-  },
-  {
-    repo: 'edsuuu/VI-BR-PORT',
-    kind: 'git',
-    extra: true,
-    description: '8 GB build: 4-7 fps at 1080p, hour-long sessions on an RTX 4060 Ti.',
-  },
-  {
-    repo: 'proneonn/Vertex',
-    kind: 'git',
-    extra: true,
-    description: 'Not playable yet; ~7-10 fps, no crash in 16 of 18 sessions on an RTX 5070.',
-  },
-  {
-    repo: 'LoverCatys/ruff-lab',
-    kind: 'git',
-    extra: true,
-    description: 'Built for 8 GB cards and 16 GB RAM; 3.6 fps average, 39 min on an RX 6600 XT.',
-  },
-  {
-    repo: 'Itsbatt/victory-unified',
-    kind: 'git',
-    extra: true,
-    description: 'Unified fork; ~58 min without a crash at 2-3 fps on an RTX 3070 8 GB.',
-  },
-  {
-    repo: 'cocainebunnylaboratories/cblvictoryvi',
-    kind: 'git',
-    extra: true,
-    description: '3.63-6.39 fps by scene at 4K, 27 min run on an RTX 5080.',
-  },
-  {
-    repo: 'KomanderDG88/VIniVIdiVIci',
-    kind: 'git',
-    extra: true,
-    description: 'About 3-5 fps on an RTX 4060 Ti, 46 min session.',
-  },
-  {
-    repo: 'voidopcode/vilocity',
-    kind: 'git',
-    extra: true,
-    description: 'Not playable yet; ~11 fps on the Series S profile, RTX 5080; runs end ~7 min in.',
-  },
-  {
-    repo: 'ka1qux/BRVIctory-ka1qux',
-    kind: 'git',
-    extra: true,
-    description: 'Measured on AMD: 3.2-3.6 fps, 25 min session on an RX 7800 XT.',
-  },
-  {
-    repo: 'myokex/victory-amd',
-    kind: 'git',
-    extra: true,
-    description: 'First room at 2-3 fps, runs of about 8 min on an RX 7800 XT.',
-  },
-  {
-    repo: 'ZigZagBoi1/ScarlettPort',
-    kind: 'git',
-    extra: true,
-    description: 'About 4 fps in the opening mission on an RTX 3060.',
-  },
-
-  // darkworldhm has a public repository after all; its HEAD matches the copy
-  // i95 vendors, so it is cloned directly. `id` lets the one-off run drop the
-  // old private-only row and lets the regular sync keep suppressing it.
-  {
-    repo: 'darkworldhm/victory-fork-darkworldhm',
-    kind: 'git',
-    extra: true,
-    source: 'effort',
-    id: 'darkworldhm',
-    description: 'A snapshot of victory-fork with its own changes; the stream build showed 5 to 24 fps (unconfirmed).',
+    description: 'RDNA build; RX 7900 XT 20 GB measured a 23.1 fps median at 4K (heavy scenes 19.1 fps), ray tracing and frame generation off.',
   },
 ];
 
-const SKIPPED = [
-  { repo: 'zohaiblazuli/GrandTheftXbox', reason: 'no public mirror found (repo and its only fork are gone, SWH only has not_found visits)' },
-];
+const SKIPPED = [];
 
 function rmrf(target) {
   fs.rmSync(target, { recursive: true, force: true });
