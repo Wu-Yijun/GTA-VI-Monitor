@@ -44,6 +44,15 @@
  * archive zip instead. This only applies while the repository is accessible
  * and not frozen; otherwise the old copy keeps being served.
  *
+ * Diagnostics logs
+ * ----------------
+ * After the per-repository cache has been written, every directory named
+ * diagnostics/ (at any depth) has its direct *.txt / *.gz children over 64 KB
+ * replaced by a short ASCII note linking to the file on GitHub. Only
+ * accessible repositories are trimmed (the link must work); the cache keeps
+ * the full copy. The archive is built from a temporary git tree, so the
+ * replacement reaches the zip without creating a commit.
+ *
  * Renames
  * -------
  * GitHub redirects a renamed repository to its canonical name (the API reports
@@ -115,6 +124,9 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024;
 // A larger copy stays in the cache but is not uploaded to Pages (GitHub's zip
 // is linked instead).
 const ARCHIVE_SIZE_LIMIT = 100 * 1024 * 1024;
+// Oversized diagnostics logs (*.txt, *.gz under any diagnostics/ directory) are
+// replaced by a short pointer note before the archive is built.
+const DIAGNOSTICS_FILE_LIMIT = 64 * 1024;
 
 const ANOMALY_LABELS = {
   code_deleted: '代码大量删除',
@@ -749,11 +761,112 @@ function githubZipUrl(repo, branch) {
   return `https://github.com/${repo}/archive/refs/heads/${ref}.zip`;
 }
 
-function makeArchive(goodDir, name) {
+const DIAGNOSTICS_NOTICE = [
+  'This diagnostics file was larger than 64 KB, so its content was replaced',
+  'by GTA-VI-Monitor with this note.',
+  '',
+  'View the original file on GitHub:',
+].join('\n');
+
+// Every directory named diagnostics/ (at any depth) is scanned; its direct
+// *.txt / *.gz children above the limit are replaced by a short pointer note.
+// The caller runs this after the per-repository cache has been written, so only
+// the working copy (and therefore the published zip) is trimmed.
+function pruneDiagnostics(rootDir, repo, ref) {
+  const dirs = [];
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === '.git') continue;
+      const full = path.join(dir, entry.name);
+      if (entry.name === 'diagnostics') dirs.push(full);
+      else walk(full);
+    }
+  };
+  walk(rootDir);
+
+  const refPath = String(ref || 'HEAD')
+    .split('/')
+    .map((part) => encodeURIComponent(part))
+    .join('/');
+  const replaced = [];
+  for (const dir of dirs) {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !/\.(txt|gz)$/i.test(entry.name)) continue;
+      const file = path.join(dir, entry.name);
+      let size;
+      try {
+        size = fs.statSync(file).size;
+      } catch {
+        continue;
+      }
+      if (size <= DIAGNOSTICS_FILE_LIMIT) continue;
+      const relative = path.relative(rootDir, file).split(path.sep).join('/');
+      const url = `https://github.com/${repo}/blob/${refPath}/${relative
+        .split('/')
+        .map((part) => encodeURIComponent(part))
+        .join('/')}`;
+      const notice = `${DIAGNOSTICS_NOTICE}\n${url}\n\nOriginal size: ${size} bytes\n`;
+      try {
+        fs.writeFileSync(file, notice, 'ascii');
+        replaced.push(relative);
+      } catch {
+        /* keep the original file when it cannot be replaced */
+      }
+    }
+  }
+  return replaced;
+}
+
+// `git archive HEAD` reads the commit tree, not the working copy. Rebuild the
+// tree through a temporary index with the replaced blobs, without creating a
+// commit or touching HEAD, and archive that tree instead.
+function archiveTreeWithReplaced(goodDir, name, replaced) {
+  fs.mkdirSync(TMP_ROOT, { recursive: true });
+  const indexFile = path.join(TMP_ROOT, `archive-${name}.index`);
+  fs.rmSync(indexFile, { force: true });
+  const env = { ...process.env, GIT_INDEX_FILE: indexFile };
+  const run = (args) => spawnSync('git', args, { cwd: goodDir, env, encoding: 'utf8', timeout: 120000 });
+  try {
+    if (run(['read-tree', 'HEAD']).status !== 0) return null;
+    for (const relative of replaced) {
+      const hashed = run(['hash-object', '-w', '--', relative]);
+      const blob = String(hashed.stdout || '').trim();
+      if (hashed.status !== 0 || !/^[0-9a-f]{40,64}$/.test(blob)) return null;
+      const updated = run(['update-index', '--add', '--cacheinfo', '100644', blob, relative]);
+      if (updated.status !== 0) return null;
+    }
+    const written = run(['write-tree']);
+    const tree = String(written.stdout || '').trim();
+    return written.status === 0 && /^[0-9a-f]{40,64}$/.test(tree) ? tree : null;
+  } finally {
+    fs.rmSync(indexFile, { force: true });
+  }
+}
+
+function makeArchive(goodDir, name, replaced = []) {
   fs.mkdirSync(ARCHIVES_DIR, { recursive: true });
   const out = path.join(ARCHIVES_DIR, `${name}.zip`);
   if (isDir(path.join(goodDir, '.git'))) {
-    const r = spawnSync('git', ['archive', '--format=zip', '-o', out, 'HEAD'], {
+    let treeish = 'HEAD';
+    if (replaced.length) {
+      treeish = archiveTreeWithReplaced(goodDir, name, replaced) || 'HEAD';
+      if (treeish === 'HEAD') {
+        console.log(`  ! ${name}: could not rebuild the archive tree, publishing HEAD as-is`);
+      }
+    }
+    const r = spawnSync('git', ['archive', '--format=zip', '-o', out, treeish], {
       cwd: goodDir,
       encoding: 'utf8',
       timeout: 180000,
@@ -993,7 +1106,15 @@ async function syncRepo(entry, prevState, tracker, name, tools) {
     rec.files = fileCount(goodDir);
     rec.sourceOnly = !isDir(path.join(goodDir, '.git'));
     if (rec.archiveLines === null) rec.archiveLines = countCodeLinesInDir(goodDir).lines;
-    rec.archive = makeArchive(goodDir, name);
+    // The copy was written to the cache above, so trimming it here keeps the
+    // cache complete while the published zip only carries the pointer notes.
+    // Unreachable repositories are skipped: their GitHub link would be dead.
+    const replaced =
+      rec.status === 'accessible' ? pruneDiagnostics(goodDir, entry.repo, rec.cacheSha || rec.headSha) : [];
+    if (replaced.length) {
+      console.log(`  > ${entry.repo}: replaced ${replaced.length} oversized diagnostics file(s) in the archive`);
+    }
+    rec.archive = makeArchive(goodDir, name, replaced);
     if (rec.archive) {
       const archiveBytes = archiveSizeOf(rec.archive);
       // A delisted repository that is still reachable can be linked just like
@@ -1829,4 +1950,5 @@ export {
   makeArchive,
   makeCacheTools,
   mergeEntries,
+  pruneDiagnostics,
 };
