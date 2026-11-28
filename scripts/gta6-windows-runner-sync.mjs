@@ -42,7 +42,14 @@
  * A copy whose zip exceeds 100 MB is still stored in the per-repository cache,
  * but it is not published as a Pages asset: the row links to GitHub's own
  * archive zip instead. This only applies while the repository is accessible
- * and not frozen/delisted; otherwise the old copy keeps being served.
+ * and not frozen; otherwise the old copy keeps being served.
+ *
+ * Renames
+ * -------
+ * GitHub redirects a renamed repository to its canonical name (the API reports
+ * it as full_name). The previous state still holds the old name, so the old
+ * row would be retained as "delisted" and duplicated. Once the tracker lists
+ * the canonical name, the stale alias row is dropped and its copy removed.
  *
  * Effective code lines
  * --------------------
@@ -616,15 +623,18 @@ async function fetchRepoMeta(repoPath) {
   const headers = { 'User-Agent': 'gta6-runners-sync', Accept: 'application/vnd.github+json' };
   if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
   const response = await fetchWithRetry(`https://api.github.com/repos/${repoPath}`, { headers }, 2, 15000);
-  if (!response || !response.ok) return { archived: false, description: null };
+  if (!response || !response.ok) return { archived: false, description: null, fullName: null };
   try {
     const json = await response.json();
     return {
       archived: Boolean(json.archived),
       description: typeof json.description === 'string' ? json.description : null,
+      // GitHub redirects a renamed repository to its canonical name; the
+      // redirected API response reports the new full_name.
+      fullName: typeof json.full_name === 'string' ? json.full_name : null,
     };
   } catch {
-    return { archived: false, description: null };
+    return { archived: false, description: null, fullName: null };
   }
 }
 
@@ -818,6 +828,7 @@ async function syncRepo(entry, prevState, tracker, name, tools) {
     error: false,
     archive: null,
     archiveUrl: null,
+    renamedTo: null,
     description: null,
     completion: null,
     archived: false,
@@ -954,6 +965,11 @@ async function syncRepo(entry, prevState, tracker, name, tools) {
   }
 
   const meta = await fetchRepoMeta(entry.repo);
+  // A previous-state row under the old name of a renamed repository is the
+  // same project; main() drops it once the tracker lists the canonical name.
+  if (meta.fullName && meta.fullName.toLowerCase() !== entry.repo.toLowerCase()) {
+    rec.renamedTo = meta.fullName;
+  }
   rec.archived = meta.archived || trackerArchived(tracker, entry.repo);
   if (rec.archived) rec.anomalies.push('frozen');
 
@@ -980,7 +996,9 @@ async function syncRepo(entry, prevState, tracker, name, tools) {
     rec.archive = makeArchive(goodDir, name);
     if (rec.archive) {
       const archiveBytes = archiveSizeOf(rec.archive);
-      const publishable = rec.status === 'accessible' && !rec.delisted && !rec.observation;
+      // A delisted repository that is still reachable can be linked just like
+      // any other: only a frozen row must keep serving its old copy.
+      const publishable = rec.status === 'accessible' && !rec.observation;
       if (archiveBytes !== null && archiveBytes > ARCHIVE_SIZE_LIMIT && publishable) {
         // Too large for GitHub Pages: keep the cache entry, but serve GitHub's
         // own zip from the page instead of uploading a copy.
@@ -1578,6 +1596,7 @@ ${rows}
       error: rec.error,
       archive: rec.archive || null,
       archiveUrl: rec.archiveUrl || null,
+      renamedTo: rec.renamedTo || null,
       archiveSize: archiveSizeOf(rec.archive),
       description: rec.description,
       completion: rec.completion,
@@ -1731,6 +1750,7 @@ async function main() {
         error: true,
         archive: null,
         archiveUrl: null,
+        renamedTo: null,
         description: entry.repo,
         completion: null,
         archived: false,
@@ -1747,6 +1767,22 @@ async function main() {
     console.log(
       `${rec.status === 'accessible' ? 'OK  ' : 'BAD '} ${rec.repo}${anomalies} files=${rec.files} lines=${rec.codeLines ?? '-'}/${rec.archiveLines ?? '-'}${obs}`,
     );
+  }
+
+  // A rename leaves the old name in the previous state while the tracker lists
+  // the new one. Both rows point at the same GitHub repository, so drop the
+  // stale alias (and any copy it just produced) instead of keeping it as a
+  // separate, delisted project.
+  const canonical = new Map(
+    results.filter((rec) => rec.repo && !rec.renamedTo).map((rec) => [rec.repo.toLowerCase(), rec]),
+  );
+  for (let index = results.length - 1; index >= 0; index -= 1) {
+    const rec = results[index];
+    if (!rec.repo || !rec.renamedTo) continue;
+    if (!canonical.has(rec.renamedTo.toLowerCase())) continue;
+    if (rec.archive) fs.rmSync(path.join(ARCHIVES_DIR, rec.archive), { force: true });
+    console.log(`  ~ ${rec.repo}: renamed to ${rec.renamedTo}, dropping the stale duplicate row`);
+    results.splice(index, 1);
   }
 
   for (const rec of retainedPrivate) {

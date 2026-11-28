@@ -11,7 +11,8 @@ name: GTA6 Windows Runners
 #      written when a new copy is accepted. If an entry is missing, the copy is
 #      taken from the deployed archives/ directory instead. A copy whose zip
 #      exceeds 100 MB is still cached, but not deployed: the page links to
-#      GitHub's own archive zip for it (accessible, non-frozen rows only).
+#      GitHub's own archive zip for it (accessible, non-frozen rows; a delisted
+#      row that is still reachable is linked too).
 #   3. Freezes a repository when its effective code lines fall below 40% of the
 #      baseline (old copy keeps being served) and recovers it on a strong
 #      rebound or after three rounds of >40-line growth.
@@ -19,6 +20,9 @@ name: GTA6 Windows Runners
 #      publish step for copies over 100 MB).
 #   5. Generates the static page dist/index.html + dist/runners.json.
 #   6. Publishes the page to GitHub Pages.
+#
+# A GitHub rename leaves the old repository name in the previous state; such a
+# stale alias row is dropped once the tracker lists the canonical name.
 #
 # @actions/cache is installed at runtime (no package.json in the repository).
 
