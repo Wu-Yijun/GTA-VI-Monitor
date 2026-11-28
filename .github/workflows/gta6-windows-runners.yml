@@ -18,8 +18,11 @@ name: GTA6 Windows Runners
 #      rebound or after three rounds of >40-line growth.
 #   4. Packs the repository copies into dist/archives/*.zip (skipping the
 #      publish step for copies over 100 MB). Oversized *.txt/*.gz files under
-#      any diagnostics/ directory are replaced by a GitHub pointer in the zip;
-#      the per-repository cache keeps the full copy.
+#      any diagnostics/ directory are replaced by a GitHub pointer in the zip.
+#      Large image/video/audio files are removed too (single file over 1 MB, or
+#      over 64 KB when the folder holds more than 5 media files) and replaced
+#      by a MEDIA_REMOVED.txt per folder. The per-repository cache keeps the
+#      full copy in all cases.
 #   5. Generates the static page dist/index.html + dist/runners.json.
 #   6. Publishes the page to GitHub Pages.
 #

@@ -53,6 +53,14 @@
  * the full copy. The archive is built from a temporary git tree, so the
  * replacement reaches the zip without creating a commit.
  *
+ * Media files
+ * -----------
+ * In the same pass each folder's media files (standard image / video / audio
+ * extensions, confirmed with `file --mime-type`) are removed when a single file
+ * is over 1 MB, or when it is over 64 KB and the folder holds more than 5 media
+ * files. One ASCII MEDIA_REMOVED.txt per affected folder lists the files and
+ * their GitHub links; the cache keeps the full copy as well.
+ *
  * Renames
  * -------
  * GitHub redirects a renamed repository to its canonical name (the API reports
@@ -127,6 +135,16 @@ const ARCHIVE_SIZE_LIMIT = 100 * 1024 * 1024;
 // Oversized diagnostics logs (*.txt, *.gz under any diagnostics/ directory) are
 // replaced by a short pointer note before the archive is built.
 const DIAGNOSTICS_FILE_LIMIT = 64 * 1024;
+// Media files are removed when a single file is over 1 MB, or when it is over
+// 64 KB and its folder holds more than 5 media files (any size).
+const MEDIA_FILE_LIMIT = 64 * 1024;
+const MEDIA_SINGLE_LIMIT = 1024 * 1024;
+const MEDIA_FOLDER_MIN_COUNT = 6;
+const MEDIA_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tga', '.tif', '.tiff', '.ico', '.avif', '.heic', '.heif',
+  '.mp4', '.mkv', '.webm', '.avi', '.mov', '.m4v', '.mpg', '.mpeg', '.wmv', '.flv', '.3gp', '.m2ts',
+  '.mp3', '.wav', '.flac', '.ogg', '.oga', '.m4a', '.aac', '.wma', '.opus', '.aiff',
+]);
 
 const ANOMALY_LABELS = {
   code_deleted: '代码大量删除',
@@ -761,6 +779,18 @@ function githubZipUrl(repo, branch) {
   return `https://github.com/${repo}/archive/refs/heads/${ref}.zip`;
 }
 
+function githubBlobUrl(repo, ref, relative) {
+  const refPath = String(ref || 'HEAD')
+    .split('/')
+    .map((part) => encodeURIComponent(part))
+    .join('/');
+  const pathPart = relative
+    .split('/')
+    .map((part) => encodeURIComponent(part))
+    .join('/');
+  return `https://github.com/${repo}/blob/${refPath}/${pathPart}`;
+}
+
 const DIAGNOSTICS_NOTICE = [
   'This diagnostics file was larger than 64 KB, so its content was replaced',
   'by GTA-VI-Monitor with this note.',
@@ -790,10 +820,6 @@ function pruneDiagnostics(rootDir, repo, ref) {
   };
   walk(rootDir);
 
-  const refPath = String(ref || 'HEAD')
-    .split('/')
-    .map((part) => encodeURIComponent(part))
-    .join('/');
   const replaced = [];
   for (const dir of dirs) {
     let entries;
@@ -813,10 +839,7 @@ function pruneDiagnostics(rootDir, repo, ref) {
       }
       if (size <= DIAGNOSTICS_FILE_LIMIT) continue;
       const relative = path.relative(rootDir, file).split(path.sep).join('/');
-      const url = `https://github.com/${repo}/blob/${refPath}/${relative
-        .split('/')
-        .map((part) => encodeURIComponent(part))
-        .join('/')}`;
+      const url = githubBlobUrl(repo, ref, relative);
       const notice = `${DIAGNOSTICS_NOTICE}\n${url}\n\nOriginal size: ${size} bytes\n`;
       try {
         fs.writeFileSync(file, notice, 'ascii');
@@ -829,10 +852,103 @@ function pruneDiagnostics(rootDir, repo, ref) {
   return replaced;
 }
 
+let fileCommandMissing = false;
+
+// `file --mime-type` is the second check for a media candidate. When the
+// command is unavailable (e.g. a local Windows run) the extension is trusted;
+// when it runs but fails, the file is kept.
+function mediaMime(file) {
+  if (fileCommandMissing) return null;
+  const r = spawnSync('file', ['--mime-type', '-b', '--', file], { encoding: 'utf8', timeout: 20000 });
+  if (r.error && r.error.code === 'ENOENT') {
+    fileCommandMissing = true;
+    return null;
+  }
+  if (r.status !== 0) return '';
+  return String(r.stdout || '').trim().split(';')[0].trim().toLowerCase();
+}
+
+const MEDIA_NOTICE = [
+  "This folder's media files were removed from the archived copy by",
+  'GTA-VI-Monitor because they are larger than 64 KB and the folder holds more',
+  'than 5 media files, or because a single file is larger than 1 MB.',
+  '',
+  'Files removed:',
+].join('\n');
+
+// Per folder: count the media files (extension match, any size), then remove
+// the ones over 1 MB, or over 64 KB when the folder holds more than 5 media
+// files. Only files confirmed by `file --mime-type` are removed, and one
+// MEDIA_REMOVED.txt per folder lists what was removed.
+function pruneMedia(rootDir, repo, ref) {
+  const removed = [];
+  const added = [];
+  const visit = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    const media = [];
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      if (!MEDIA_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
+      let size;
+      try {
+        size = fs.statSync(path.join(dir, entry.name)).size;
+      } catch {
+        continue;
+      }
+      media.push({ name: entry.name, size });
+    }
+    if (media.length) {
+      const targets = media.filter(
+        (file) => file.size > MEDIA_SINGLE_LIMIT || (file.size > MEDIA_FILE_LIMIT && media.length >= MEDIA_FOLDER_MIN_COUNT),
+      );
+      const deleted = [];
+      for (const file of targets) {
+        const full = path.join(dir, file.name);
+        const mime = mediaMime(full);
+        if (mime !== null && !/^(image|video|audio)\//.test(mime)) continue;
+        try {
+          fs.rmSync(full);
+          deleted.push(file);
+        } catch {
+          /* leave the file when it cannot be removed */
+        }
+      }
+      if (deleted.length) {
+        const relativeDir = path.relative(rootDir, dir).split(path.sep).join('/');
+        const lines = deleted.map((file) => {
+          const relative = relativeDir ? `${relativeDir}/${file.name}` : file.name;
+          removed.push(relative);
+          return `- ${file.name} (${file.size} bytes)\n  ${githubBlobUrl(repo, ref, relative)}`;
+        });
+        const note = relativeDir ? `${relativeDir}/MEDIA_REMOVED.txt` : 'MEDIA_REMOVED.txt';
+        try {
+          fs.writeFileSync(path.join(dir, 'MEDIA_REMOVED.txt'), `${MEDIA_NOTICE}\n${lines.join('\n')}\n`, 'ascii');
+          added.push(note);
+        } catch {
+          /* keep the deletions even when the note cannot be written */
+        }
+      }
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name !== '.git') visit(path.join(dir, entry.name));
+    }
+  };
+  visit(rootDir);
+  return { removed, added };
+}
+
 // `git archive HEAD` reads the commit tree, not the working copy. Rebuild the
 // tree through a temporary index with the replaced blobs, without creating a
 // commit or touching HEAD, and archive that tree instead.
-function archiveTreeWithReplaced(goodDir, name, replaced) {
+function archiveTreeWithChanges(goodDir, name, changes) {
+  const replaced = changes.replaced || [];
+  const removed = changes.removed || [];
+  const added = changes.added || [];
   fs.mkdirSync(TMP_ROOT, { recursive: true });
   const indexFile = path.join(TMP_ROOT, `archive-${name}.index`);
   fs.rmSync(indexFile, { force: true });
@@ -840,7 +956,10 @@ function archiveTreeWithReplaced(goodDir, name, replaced) {
   const run = (args) => spawnSync('git', args, { cwd: goodDir, env, encoding: 'utf8', timeout: 120000 });
   try {
     if (run(['read-tree', 'HEAD']).status !== 0) return null;
-    for (const relative of replaced) {
+    for (const relative of removed) {
+      if (run(['update-index', '--force-remove', '--', relative]).status !== 0) return null;
+    }
+    for (const relative of [...replaced, ...added]) {
       const hashed = run(['hash-object', '-w', '--', relative]);
       const blob = String(hashed.stdout || '').trim();
       if (hashed.status !== 0 || !/^[0-9a-f]{40,64}$/.test(blob)) return null;
@@ -855,13 +974,15 @@ function archiveTreeWithReplaced(goodDir, name, replaced) {
   }
 }
 
-function makeArchive(goodDir, name, replaced = []) {
+function makeArchive(goodDir, name, changes = {}) {
   fs.mkdirSync(ARCHIVES_DIR, { recursive: true });
   const out = path.join(ARCHIVES_DIR, `${name}.zip`);
   if (isDir(path.join(goodDir, '.git'))) {
     let treeish = 'HEAD';
-    if (replaced.length) {
-      treeish = archiveTreeWithReplaced(goodDir, name, replaced) || 'HEAD';
+    const changedCount =
+      (changes.replaced || []).length + (changes.removed || []).length + (changes.added || []).length;
+    if (changedCount) {
+      treeish = archiveTreeWithChanges(goodDir, name, changes) || 'HEAD';
       if (treeish === 'HEAD') {
         console.log(`  ! ${name}: could not rebuild the archive tree, publishing HEAD as-is`);
       }
@@ -1109,12 +1230,16 @@ async function syncRepo(entry, prevState, tracker, name, tools) {
     // The copy was written to the cache above, so trimming it here keeps the
     // cache complete while the published zip only carries the pointer notes.
     // Unreachable repositories are skipped: their GitHub link would be dead.
-    const replaced =
-      rec.status === 'accessible' ? pruneDiagnostics(goodDir, entry.repo, rec.cacheSha || rec.headSha) : [];
+    const ref = rec.cacheSha || rec.headSha;
+    const replaced = rec.status === 'accessible' ? pruneDiagnostics(goodDir, entry.repo, ref) : [];
+    const media = rec.status === 'accessible' ? pruneMedia(goodDir, entry.repo, ref) : { removed: [], added: [] };
     if (replaced.length) {
       console.log(`  > ${entry.repo}: replaced ${replaced.length} oversized diagnostics file(s) in the archive`);
     }
-    rec.archive = makeArchive(goodDir, name, replaced);
+    if (media.removed.length) {
+      console.log(`  > ${entry.repo}: removed ${media.removed.length} media file(s) in ${media.added.length} folder(s)`);
+    }
+    rec.archive = makeArchive(goodDir, name, { replaced, removed: media.removed, added: media.added });
     if (rec.archive) {
       const archiveBytes = archiveSizeOf(rec.archive);
       // A delisted repository that is still reachable can be linked just like
@@ -1951,4 +2076,5 @@ export {
   makeCacheTools,
   mergeEntries,
   pruneDiagnostics,
+  pruneMedia,
 };
